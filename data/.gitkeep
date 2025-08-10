@@ -1,0 +1,3 @@
+# 这个文件用于保持data目录在git中被追踪
+# data目录用于存储Ollama模型文件
+# 实际的模型文件会被.gitignore忽略

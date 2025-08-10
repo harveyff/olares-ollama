@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    restart: unless-stopped
+
+  olares-ollama:
+    build: .
+    container_name: olares-ollama
+    ports:
+      - "8080:8080"
+    environment:
+      - OLLAMA_MODEL=llama2
+      - OLLAMA_URL=http://ollama:11434
+      - PORT=8080
+      - DOWNLOAD_TIMEOUT=120  # 2 hours download timeout
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+# Using local data directory, no need to define volumes

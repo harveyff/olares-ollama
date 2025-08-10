@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Olares-Ollama Model Download</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            max-width: 600px;
+            width: 90%;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .header h1 {
+            color: #333;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            color: #666;
+            font-size: 1.1em;
+        }
+        
+        .status {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            border-left: 4px solid #007bff;
+        }
+        
+        .status-text {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 10px;
+        }
+        
+        .model-name {
+            color: #007bff;
+            font-weight: bold;
+        }
+        
+        .progress-container {
+            margin: 20px 0;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 12px;
+            background: #e9ecef;
+            border-radius: 6px;
+            overflow: hidden;
+            margin-bottom: 10px;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #007bff, #0056b3);
+            width: 0%;
+            transition: width 0.3s ease;
+            border-radius: 6px;
+        }
+        
+        .progress-text {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.9em;
+            color: #666;
+        }
+        
+        .details {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+        
+        .detail-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 0.9em;
+        }
+        
+        .detail-label {
+            font-weight: 600;
+            color: #555;
+        }
+        
+        .detail-value {
+            color: #333;
+        }
+        
+        .success {
+            background: #d4edda;
+            border-left-color: #28a745;
+        }
+        
+        .error {
+            background: #f8d7da;
+            border-left-color: #dc3545;
+        }
+        
+        .loading {
+            border-left-color: #ffc107;
+        }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+        
+        .loading .status-text {
+            animation: pulse 2s infinite;
+        }
+        
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 Olares-Ollama</h1>
+            <p>AI Model Download Manager</p>
+        </div>
+        
+        <div id="status" class="status loading">
+            <div class="status-text">Connecting to server...</div>
+        </div>
+        
+        <div id="progress-container" class="progress-container hidden">
+            <div class="progress-bar">
+                <div id="progress-fill" class="progress-fill"></div>
+            </div>
+            <div class="progress-text">
+                <span id="progress-percent">0%</span>
+                <span id="progress-size">0 / 0 MB</span>
+            </div>
+        </div>
+        
+        <div id="details" class="details hidden">
+            <div class="detail-item">
+                <span class="detail-label">Model Name:</span>
+                <span id="model-name" class="detail-value">-</span>
+            </div>
+            <div class="detail-item">
+                <span class="detail-label">Current Status:</span>
+                <span id="current-status" class="detail-value">-</span>
+            </div>
+            <div class="detail-item">
+                <span class="detail-label">Last Update:</span>
+                <span id="last-update" class="detail-value">-</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class DownloadProgressTracker {
+            constructor() {
+                this.pollInterval = 2000; // 2秒轮询一次
+                this.isPolling = false;
+                
+                this.elements = {
+                    status: document.getElementById('status'),
+                    statusText: document.querySelector('.status-text'),
+                    progressContainer: document.getElementById('progress-container'),
+                    progressFill: document.getElementById('progress-fill'),
+                    progressPercent: document.getElementById('progress-percent'),
+                    progressSize: document.getElementById('progress-size'),
+                    details: document.getElementById('details'),
+                    modelName: document.getElementById('model-name'),
+                    currentStatus: document.getElementById('current-status'),
+                    lastUpdate: document.getElementById('last-update')
+                };
+                
+                this.startPolling();
+            }
+            
+            startPolling() {
+                if (this.isPolling) return;
+                this.isPolling = true;
+                this.fetchProgress();
+            }
+            
+            async fetchProgress() {
+                try {
+                    const response = await fetch('/api/progress');
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+                    
+                    const data = await response.json();
+                    this.updateProgress(data);
+                    
+                    // If download complete, reduce polling frequency
+                    if (data.status === 'success' || data.status === 'complete') {
+                        setTimeout(() => this.fetchProgress(), this.pollInterval * 3); // Slow down polling
+                    } else {
+                        setTimeout(() => this.fetchProgress(), this.pollInterval);
+                    }
+                } catch (error) {
+                    console.error('Failed to fetch progress:', error);
+                    this.updateStatus('Unable to get progress information', 'error');
+                    
+                    // Retry with delay on error
+                    setTimeout(() => this.fetchProgress(), this.pollInterval * 2);
+                }
+            }
+            
+            updateProgress(data) {
+                const { status, progress, total, completed, model_name, timestamp } = data;
+                
+                // Update basic information
+                this.elements.modelName.textContent = model_name || '-';
+                this.elements.currentStatus.textContent = status || '-';
+                this.elements.lastUpdate.textContent = new Date(timestamp * 1000).toLocaleString();
+                
+                // Show details
+                this.elements.details.classList.remove('hidden');
+                
+                // Update interface based on status
+                if (status === 'success' || status === 'complete') {
+                    this.updateStatus(`Model ${model_name} download completed!`, 'success');
+                    this.elements.progressContainer.classList.add('hidden');
+                } else if (status === 'downloading' || status === 'pulling' || status.includes('pulling')) {
+                    this.updateStatus(`Downloading model ${model_name}...`, 'loading');
+                    this.showProgress(progress, completed, total);
+                } else if (status === 'verifying sha256 digest') {
+                    this.updateStatus(`Verifying model file integrity...`, 'loading');
+                    this.showProgress(95, 0, 0); // Show 95% progress
+                } else if (status === 'writing manifest') {
+                    this.updateStatus(`Writing model manifest file...`, 'loading');
+                    this.showProgress(98, 0, 0); // Show 98% progress
+                } else if (status === 'error') {
+                    this.updateStatus('Download error occurred', 'error');
+                    this.elements.progressContainer.classList.add('hidden');
+                } else if (status === 'starting') {
+                    this.updateStatus(`Preparing to download model ${model_name}...`, 'loading');
+                    this.showProgress(0, 0, 0);
+                } else {
+                    this.updateStatus(`Status: ${status}`, 'loading');
+                    this.showProgress(progress, completed, total);
+                }
+            }
+            
+            updateStatus(text, type) {
+                this.elements.statusText.textContent = text;
+                this.elements.status.className = `status ${type}`;
+            }
+            
+            showProgress(progress, completed, total) {
+                this.elements.progressContainer.classList.remove('hidden');
+                
+                const percent = Math.max(0, Math.min(100, Math.round(progress || 0)));
+                this.elements.progressFill.style.width = `${percent}%`;
+                this.elements.progressPercent.textContent = `${percent}%`;
+                
+                if (total > 0 && completed >= 0) {
+                    const completedMB = Math.round(completed / (1024 * 1024));
+                    const totalMB = Math.round(total / (1024 * 1024));
+                    this.elements.progressSize.textContent = `${completedMB} / ${totalMB} MB`;
+                } else if (progress >= 95) {
+                    // Verification and writing phase
+                    if (progress >= 98) {
+                        this.elements.progressSize.textContent = 'Completing...';
+                    } else {
+                        this.elements.progressSize.textContent = 'Verifying...';
+                    }
+                } else if (progress > 0) {
+                    this.elements.progressSize.textContent = `${percent}%`;
+                } else {
+                    this.elements.progressSize.textContent = 'Preparing download...';
+                }
+            }
+        }
+        
+        // Initialize progress tracker
+        document.addEventListener('DOMContentLoaded', () => {
+            new DownloadProgressTracker();
+        });
+    </script>
+</body>
+</html>

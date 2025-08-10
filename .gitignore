@@ -1,0 +1,56 @@
+# 编译生成的二进制文件
+olares-ollama
+olares-ollama.exe
+
+# Go模块缓存和依赖
+go.sum
+vendor/
+
+# 模型数据目录（保留.gitkeep文件）
+data/*
+!data/.gitkeep
+
+# 环境变量文件
+.env
+.env.local
+
+# 日志文件
+*.log
+
+# 临时文件
+*.tmp
+*.temp
+
+# IDE/编辑器文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS系统文件
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows系统文件
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux系统文件
+*~
+
+# 测试覆盖率文件
+coverage.out
+*.cover
+
+# 构建输出
+dist/
+build/
+
+# 调试文件
+debug
+
+# 其他
+*.pid
