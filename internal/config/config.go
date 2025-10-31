@@ -11,6 +11,7 @@ type Config struct {
 	OllamaURL       string // Ollama server address
 	Port            int    // Proxy server port
 	DownloadTimeout int    // Download timeout in minutes
+	AppURL          string // Application URL for API access
 }
 
 // Load loads configuration from environment variables
@@ -20,6 +21,7 @@ func Load() *Config {
 		OllamaURL:       getEnv("OLLAMA_URL", "http://localhost:11434"),
 		Port:            getEnvInt("PORT", 8080),
 		DownloadTimeout: getEnvInt("DOWNLOAD_TIMEOUT", 60), // Default 60 minutes
+		AppURL:          getEnv("APP_URL", ""),
 	}
 
 	return cfg

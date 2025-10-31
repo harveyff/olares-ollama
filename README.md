@@ -36,6 +36,7 @@ export OLLAMA_MODEL=llama2              # Model name to use
 export OLLAMA_URL=http://localhost:11434  # Ollama server address
 export PORT=8080                        # Proxy server port
 export DOWNLOAD_TIMEOUT=60              # Download timeout in minutes
+export APP_URL=https://your-api-url.com/  # API access URL (optional, shown after download completes)
 ```
 
 4. Run the server:
@@ -58,6 +59,7 @@ http://localhost:8080
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama server address |
 | `PORT` | `8080` | Proxy server port |
 | `DOWNLOAD_TIMEOUT` | `60` | Model download timeout in minutes |
+| `APP_URL` | (empty) | API access URL displayed after download completes (optional) |
 
 ## API Interfaces
 

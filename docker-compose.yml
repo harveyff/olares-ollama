@@ -22,6 +22,7 @@ services:
       - OLLAMA_URL=http://ollama:11434
       - PORT=8080
       - DOWNLOAD_TIMEOUT=120  # 2 hours download timeout
+      - APP_URL=https://xx.userid.olares.cn/  # API access URL (optional)
     depends_on:
       - ollama
     restart: unless-stopped

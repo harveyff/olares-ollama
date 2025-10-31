@@ -23,7 +23,7 @@ func New(cfg *config.Config, ollamaClient *ollama.Client) *Server {
 	s := &Server{
 		config:          cfg,
 		ollamaClient:    ollamaClient,
-		progressManager: download.NewProgressManager(),
+		progressManager: download.NewProgressManager(cfg.AppURL),
 		mux:             http.NewServeMux(),
 	}
 

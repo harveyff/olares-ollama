@@ -180,6 +180,12 @@
                 <span id="last-update" class="detail-value">-</span>
             </div>
         </div>
+        
+        <div id="api-url-container" class="hidden" style="margin-top: 20px; padding: 15px; background: #e7f3ff; border-radius: 8px; border-left: 4px solid #007bff;">
+            <div style="font-size: 0.95em; color: #555; line-height: 1.6;">
+                The model is available through the API: <a id="api-url-link" href="#" target="_blank" style="color: #007bff; text-decoration: none; font-weight: 600;">-</a>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -198,7 +204,9 @@
                     details: document.getElementById('details'),
                     modelName: document.getElementById('model-name'),
                     currentStatus: document.getElementById('current-status'),
-                    lastUpdate: document.getElementById('last-update')
+                    lastUpdate: document.getElementById('last-update'),
+                    apiUrlContainer: document.getElementById('api-url-container'),
+                    apiUrlLink: document.getElementById('api-url-link')
                 };
                 
                 this.startPolling();
@@ -250,6 +258,10 @@
                 if (status === 'success' || status === 'complete') {
                     this.updateStatus(`Model ${model_name} download completed!`, 'success');
                     this.elements.progressContainer.classList.add('hidden');
+                    // Display API URL if available
+                    if (data.app_url) {
+                        this.showApiUrl(data.app_url);
+                    }
                 } else if (status === 'downloading' || status === 'pulling' || status.includes('pulling')) {
                     this.updateStatus(`Downloading model ${model_name}...`, 'loading');
                     this.showProgress(progress, completed, total);
@@ -298,6 +310,14 @@
                     this.elements.progressSize.textContent = `${percent}%`;
                 } else {
                     this.elements.progressSize.textContent = 'Preparing download...';
+                }
+            }
+            
+            showApiUrl(appUrl) {
+                if (appUrl) {
+                    this.elements.apiUrlContainer.classList.remove('hidden');
+                    this.elements.apiUrlLink.href = appUrl;
+                    this.elements.apiUrlLink.textContent = appUrl;
                 }
             }
         }

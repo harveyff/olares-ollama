@@ -16,6 +16,7 @@ type ProgressManager struct {
 	total     int64
 	completed int64
 	modelName string
+	appURL    string
 }
 
 // ProgressUpdate 进度更新信息
@@ -29,8 +30,10 @@ type ProgressUpdate struct {
 }
 
 // NewProgressManager 创建新的进度管理器
-func NewProgressManager() *ProgressManager {
-	return &ProgressManager{}
+func NewProgressManager(appURL string) *ProgressManager {
+	return &ProgressManager{
+		appURL: appURL,
+	}
 }
 
 // UpdateProgress 更新下载进度
@@ -79,6 +82,7 @@ func (pm *ProgressManager) HandleProgressAPI(w http.ResponseWriter, r *http.Requ
 		"completed":  progress.Completed,
 		"model_name": progress.ModelName,
 		"timestamp":  progress.Timestamp,
+		"app_url":    pm.appURL,
 	}
 
 	if err := json.NewEncoder(w).Encode(response); err != nil {
