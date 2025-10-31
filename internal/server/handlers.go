@@ -9,26 +9,85 @@ import (
 	"strings"
 )
 
-// handleTags handles model list requests, only returns the currently configured model
+// handleTags handles model list requests, forwards from ollama and filters by configured models
 func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-
-	// Build response containing only the current model
-	response := map[string]interface{}{
-		"models": []map[string]interface{}{
-			{
-				"name":        s.config.Model,
-				"modified_at": "2024-01-01T00:00:00Z",
-				"size":        0,
-			},
-		},
+	// Collect header information
+	headers := make(map[string]string)
+	for key, values := range r.Header {
+		if len(values) > 0 && !strings.HasPrefix(strings.ToLower(key), "host") {
+			headers[key] = values[0]
+		}
 	}
 
+	// Proxy request to Ollama
+	resp, err := s.ollamaClient.ProxyRequest(
+		r.Method,
+		"/api/tags",
+		nil,
+		headers,
+	)
+	if err != nil {
+		log.Printf("Failed to proxy request to ollama: %v", err)
+		http.Error(w, "Failed to proxy request", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		// Copy error response
+		for key, values := range resp.Header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+		return
+	}
+
+	// Parse response from ollama
+	var ollamaResponse map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&ollamaResponse); err != nil {
+		log.Printf("Failed to decode ollama response: %v", err)
+		http.Error(w, "Failed to decode response", http.StatusInternalServerError)
+		return
+	}
+
+	// Filter models: only keep the configured model
+	models, ok := ollamaResponse["models"].([]interface{})
+	if !ok {
+		log.Printf("Invalid models format in ollama response")
+		http.Error(w, "Invalid response format", http.StatusInternalServerError)
+		return
+	}
+
+	filteredModels := []interface{}{}
+	for _, model := range models {
+		modelMap, ok := model.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		modelName, ok := modelMap["name"].(string)
+		if !ok {
+			continue
+		}
+		// Only keep the configured model
+		if modelName == s.config.Model {
+			filteredModels = append(filteredModels, model)
+		}
+	}
+
+	// Build filtered response
+	response := map[string]interface{}{
+		"models": filteredModels,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
 
