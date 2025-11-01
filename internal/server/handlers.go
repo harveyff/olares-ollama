@@ -93,7 +93,13 @@ func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
 
 // handleGenerate handles text generation requests
 func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
+	// Allow POST and handle OPTIONS for CORS preflight
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != "POST" {
+		log.Printf("Generate endpoint received unsupported method: %s from %s", r.Method, r.RemoteAddr)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -102,16 +108,29 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 
 // handleChat handles chat requests
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	// Allow POST and handle OPTIONS for CORS preflight
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != "POST" {
+		log.Printf("Chat endpoint received unsupported method: %s from %s", r.Method, r.RemoteAddr)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	log.Printf("Handling chat request from %s", r.RemoteAddr)
 	s.handleInferenceRequest(w, r, "/api/chat")
 }
 
 // handleEmbeddings handles embedding vector requests
 func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
+	// Allow POST and handle OPTIONS for CORS preflight
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != "POST" {
+		log.Printf("Embeddings endpoint received unsupported method: %s from %s", r.Method, r.RemoteAddr)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -123,14 +142,23 @@ func (s *Server) handleInferenceRequest(w http.ResponseWriter, r *http.Request, 
 	// Read request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		log.Printf("Failed to read request body for %s: %v", path, err)
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
 	defer r.Body.Close()
 
+	// Check if body is empty
+	if len(body) == 0 {
+		log.Printf("Empty request body for %s", path)
+		http.Error(w, "Request body cannot be empty", http.StatusBadRequest)
+		return
+	}
+
 	// Parse JSON to replace model parameters
 	var requestData map[string]interface{}
 	if err := json.Unmarshal(body, &requestData); err != nil {
+		log.Printf("Failed to parse JSON for %s: %v, body: %s", path, err, string(body))
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -141,6 +169,7 @@ func (s *Server) handleInferenceRequest(w http.ResponseWriter, r *http.Request, 
 	// Re-serialize
 	modifiedBody, err := json.Marshal(requestData)
 	if err != nil {
+		log.Printf("Failed to marshal request for %s: %v", path, err)
 		http.Error(w, "Failed to modify request", http.StatusInternalServerError)
 		return
 	}
@@ -154,6 +183,9 @@ func (s *Server) handleInferenceRequest(w http.ResponseWriter, r *http.Request, 
 	}
 	headers["Content-Type"] = "application/json"
 
+	// Log the request being proxied
+	log.Printf("Proxying %s request to Ollama %s (model: %s)", r.Method, path, s.config.Model)
+
 	// Proxy request to Ollama
 	resp, err := s.ollamaClient.ProxyRequest(
 		r.Method,
@@ -162,11 +194,16 @@ func (s *Server) handleInferenceRequest(w http.ResponseWriter, r *http.Request, 
 		headers,
 	)
 	if err != nil {
-		log.Printf("Failed to proxy request: %v", err)
+		log.Printf("Failed to proxy request to Ollama %s: %v", path, err)
 		http.Error(w, "Failed to proxy request", http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
+
+	// Log response status
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		log.Printf("Ollama returned status %d for %s request to %s", resp.StatusCode, r.Method, path)
+	}
 
 	// Copy response headers
 	for key, values := range resp.Header {

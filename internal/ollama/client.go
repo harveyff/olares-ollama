@@ -208,14 +208,24 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 
 // ProxyRequest 代理请求到Ollama
 func (c *Client) ProxyRequest(method, path string, body io.Reader, headers map[string]string) (*http.Response, error) {
-	req, err := http.NewRequest(method, c.baseURL+path, body)
+	url := c.baseURL + path
+	req, err := http.NewRequest(method, url, body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// 复制头部
+	// 复制头部，但确保 Content-Type 正确设置
 	for key, value := range headers {
+		// 跳过可能冲突的头部（如 Content-Length，Go 会自动设置）
+		if strings.ToLower(key) == "content-length" {
+			continue
+		}
 		req.Header.Set(key, value)
+	}
+
+	// 确保请求方法正确
+	if req.Method != method {
+		return nil, fmt.Errorf("request method mismatch: expected %s, got %s", method, req.Method)
 	}
 
 	return c.httpClient.Do(req)
