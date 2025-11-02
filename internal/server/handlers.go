@@ -122,14 +122,20 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Handle GET requests (may be used for health checks by OpenWebUI)
-	// Return 200 OK with minimal response to indicate endpoint is available
+	// Some clients might send GET to verify endpoint, but /api/chat requires POST
+	// Return a response that indicates the endpoint exists but needs POST
 	if r.Method == "GET" {
-		log.Printf("Chat endpoint received GET request from %s (health check - returning 200 OK)", r.RemoteAddr)
+		log.Printf("Chat endpoint received GET request from %s (health check)", r.RemoteAddr)
+		// Check if this might be OpenWebUI trying to verify the endpoint
+		userAgent := r.UserAgent()
+		log.Printf("GET request UserAgent: %s, Referer: %s", userAgent, r.Header.Get("Referer"))
+		
+		// Return 405 but with Allow header, some clients check this
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		// Return a simple response that OpenWebUI can recognize
+		w.Header().Set("Allow", "POST, OPTIONS")
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status": "ok",
+			"error": "GET method not allowed for /api/chat. Use POST method.",
 		})
 		return
 	}

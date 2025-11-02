@@ -83,10 +83,12 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Log all API requests for debugging
 		if strings.HasPrefix(r.URL.Path, "/api/") {
-			log.Printf("[CORS] Incoming: %s %s from %s (UA: %s)", r.Method, r.URL.Path, r.RemoteAddr, r.UserAgent())
+			log.Printf("[CORS] ==== REQUEST START ==== %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+			log.Printf("[CORS] Headers: Content-Type=%s, Origin=%s, User-Agent=%s", 
+				r.Header.Get("Content-Type"), r.Header.Get("Origin"), r.UserAgent())
 		}
 		
-		// Set CORS headers
+		// Set CORS headers on all responses
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
 		w.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization, X-Requested-With")
@@ -96,11 +98,29 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 		if r.Method == "OPTIONS" {
 			log.Printf("[CORS] OPTIONS preflight for %s - returning 204", r.URL.Path)
 			w.WriteHeader(http.StatusNoContent)
+			log.Printf("[CORS] ===== REQUEST END (OPTIONS) =====")
 			return
 		}
 
-		next.ServeHTTP(w, r)
+		// Use a ResponseWriter wrapper to log response status
+		wrapped := &responseLogger{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(wrapped, r)
+		
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			log.Printf("[CORS] ===== REQUEST END ==== %s %s -> Status: %d", r.Method, r.URL.Path, wrapped.statusCode)
+		}
 	})
+}
+
+// responseLogger wraps ResponseWriter to capture status code
+type responseLogger struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rl *responseLogger) WriteHeader(code int) {
+	rl.statusCode = code
+	rl.ResponseWriter.WriteHeader(code)
 }
 
 // GetProgressManager 获取进度管理器
