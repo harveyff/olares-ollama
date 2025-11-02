@@ -122,19 +122,17 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Handle GET requests (used by OpenWebUI for health checks)
-	// OpenWebUI might be checking if this is a valid Ollama endpoint
-	// Return an empty response similar to what Ollama might return
+	// OpenWebUI expects a dict/object response (with .get() method), not a list
 	if r.Method == "GET" {
 		log.Printf("Chat endpoint received GET request from %s (health check)", r.RemoteAddr)
 		userAgent := r.UserAgent()
 		log.Printf("GET request UserAgent: %s, Referer: %s", userAgent, r.Header.Get("Referer"))
 		
-		// Return an empty array response, similar to what some Ollama endpoints return
-		// This might help OpenWebUI recognize this as a valid endpoint
+		// Return an empty object, not an array, so OpenWebUI can call .get() on it
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode([]interface{}{})
-		log.Printf("GET request responded with 200 OK (empty array)")
+		json.NewEncoder(w).Encode(map[string]interface{}{})
+		log.Printf("GET request responded with 200 OK (empty object)")
 		return
 	}
 	if r.Method != "POST" {
