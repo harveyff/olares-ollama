@@ -109,8 +109,13 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 
 // handleChat handles chat requests
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	// Log all incoming requests to /api/chat
+	log.Printf("=== Chat endpoint: Method=%s, RemoteAddr=%s, UserAgent=%s, ContentType=%s ===", 
+		r.Method, r.RemoteAddr, r.UserAgent(), r.Header.Get("Content-Type"))
+	
 	// Allow POST and handle OPTIONS for CORS preflight
 	if r.Method == "OPTIONS" {
+		log.Printf("Handling OPTIONS request for /api/chat")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -140,7 +145,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	log.Printf("Handling chat request from %s", r.RemoteAddr)
+	log.Printf("*** Handling POST chat request from %s ***", r.RemoteAddr)
 	s.handleInferenceRequest(w, r, "/api/chat")
 }
 
@@ -206,7 +211,15 @@ func (s *Server) handleInferenceRequest(w http.ResponseWriter, r *http.Request, 
 	headers["Content-Type"] = "application/json"
 
 	// Log the request being proxied
-	log.Printf("Proxying %s request to Ollama %s (model: %s)", r.Method, path, s.config.Model)
+	bodyPreviewLen := len(modifiedBody)
+	if bodyPreviewLen > 200 {
+		bodyPreviewLen = 200
+	}
+	log.Printf(">>> Proxying %s request to Ollama %s (model: %s, body size: %d bytes) <<<", 
+		r.Method, path, s.config.Model, len(modifiedBody))
+	if len(modifiedBody) > 0 {
+		log.Printf(">>> Request body preview: %s", string(modifiedBody[:bodyPreviewLen]))
+	}
 
 	// Proxy request to Ollama
 	resp, err := s.ollamaClient.ProxyRequest(
@@ -216,15 +229,16 @@ func (s *Server) handleInferenceRequest(w http.ResponseWriter, r *http.Request, 
 		headers,
 	)
 	if err != nil {
-		log.Printf("Failed to proxy request to Ollama %s: %v", path, err)
+		log.Printf("!!! Failed to proxy request to Ollama %s: %v !!!", path, err)
 		http.Error(w, "Failed to proxy request", http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
 
 	// Log response status
+	log.Printf("<<< Ollama returned status %d for %s request to %s <<<", resp.StatusCode, r.Method, path)
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		log.Printf("Ollama returned status %d for %s request to %s", resp.StatusCode, r.Method, path)
+		log.Printf("!!! Warning: Ollama returned non-success status %d !!!", resp.StatusCode)
 	}
 
 	// Copy response headers
