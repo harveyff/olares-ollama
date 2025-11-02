@@ -12,7 +12,9 @@ import (
 
 // handleTags handles model list requests, forwards from ollama and filters by configured models
 func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
+	log.Printf("=== Tags endpoint: Method=%s, RemoteAddr=%s ===", r.Method, r.RemoteAddr)
 	if r.Method != "GET" {
+		log.Printf("Tags endpoint received unsupported method: %s", r.Method)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -120,17 +122,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Handle GET requests (may be used for health checks by OpenWebUI)
+	// OpenWebUI might send GET to verify endpoint, but Ollama /api/chat only accepts POST
+	// So we return method not allowed with proper headers
 	if r.Method == "GET" {
-		log.Printf("Chat endpoint received GET request from %s (likely health check)", r.RemoteAddr)
-		// Return a successful response to indicate endpoint is available
-		// OpenWebUI may use GET to check if endpoint is reachable
+		log.Printf("Chat endpoint received GET request from %s (health check - Ollama /api/chat requires POST)", r.RemoteAddr)
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Allow", "POST, OPTIONS")
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"endpoint": "/api/chat",
-			"method":   "POST",
-			"status":   "available",
-			"model":    s.config.Model,
+			"error": "Method GET not allowed. Use POST to chat.",
 		})
 		return
 	}

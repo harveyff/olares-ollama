@@ -81,17 +81,20 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // corsMiddleware CORS中间件
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Log all requests for debugging
+		// Log all API requests for debugging
 		if strings.HasPrefix(r.URL.Path, "/api/") {
-			log.Printf("[CORS] Request: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+			log.Printf("[CORS] Incoming: %s %s from %s (UA: %s)", r.Method, r.URL.Path, r.RemoteAddr, r.UserAgent())
 		}
 		
+		// Set CORS headers
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
+		w.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization, X-Requested-With")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Access-Control-Max-Age", "3600")
 
 		if r.Method == "OPTIONS" {
-			log.Printf("[CORS] Handling OPTIONS preflight for %s", r.URL.Path)
+			log.Printf("[CORS] OPTIONS preflight for %s - returning 204", r.URL.Path)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
