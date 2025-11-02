@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -113,9 +114,30 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	// Handle GET requests (may be used for health checks by OpenWebUI)
+	if r.Method == "GET" {
+		log.Printf("Chat endpoint received GET request from %s (likely health check)", r.RemoteAddr)
+		// Return a successful response to indicate endpoint is available
+		// OpenWebUI may use GET to check if endpoint is reachable
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"endpoint": "/api/chat",
+			"method":   "POST",
+			"status":   "available",
+			"model":    s.config.Model,
+		})
+		return
+	}
 	if r.Method != "POST" {
 		log.Printf("Chat endpoint received unsupported method: %s from %s", r.Method, r.RemoteAddr)
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		// Return JSON error response for better compatibility
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Allow", "POST, GET, OPTIONS")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": fmt.Sprintf("Method %s not allowed for /api/chat endpoint. Supported methods: POST, GET, OPTIONS", r.Method),
+		})
 		return
 	}
 	log.Printf("Handling chat request from %s", r.RemoteAddr)
