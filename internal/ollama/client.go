@@ -26,9 +26,10 @@ func NewClient(baseURL string) *Client {
 func NewClientWithTimeout(baseURL string, downloadTimeoutMinutes int) *Client {
 	return &Client{
 		baseURL: strings.TrimSuffix(baseURL, "/"),
-		// Regular request client, 30 seconds timeout
+		// Regular request client, 30 minutes timeout for long inference requests
+		// This is needed for chat completions that may take a long time
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 30 * time.Minute,
 		},
 		// Download dedicated client, configurable timeout
 		downloadClient: &http.Client{
