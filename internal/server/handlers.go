@@ -246,18 +246,82 @@ func (s *Server) handleInferenceRequest(w http.ResponseWriter, r *http.Request, 
 		log.Printf("!!! Warning: Ollama returned non-success status %d !!!", resp.StatusCode)
 	}
 
-	// Copy response headers
+	// Copy response headers (except for ones that should be controlled by the response writer)
 	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
+		keyLower := strings.ToLower(key)
+		// Skip headers that should be controlled by the response writer
+		if keyLower != "content-length" && keyLower != "transfer-encoding" && keyLower != "connection" {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
 		}
+	}
+
+	// Check if this is a streaming response
+	isStreaming := false
+	if resp.Header.Get("Transfer-Encoding") == "chunked" || resp.Header.Get("Content-Type") == "text/event-stream" {
+		isStreaming = true
+		w.Header().Set("Transfer-Encoding", "chunked")
+		w.Header().Set("Connection", "keep-alive")
 	}
 
 	// Set status code
 	w.WriteHeader(resp.StatusCode)
+	
+	// Flush headers if possible (for streaming)
+	if flusher, ok := w.(http.Flusher); ok && isStreaming {
+		flusher.Flush()
+	}
 
-	// Stream copy response body
-	io.Copy(w, resp.Body)
+	// Stream copy response body with proper flushing for streaming responses
+	if isStreaming {
+		if flusher, ok := w.(http.Flusher); ok {
+			// Use buffered copy with periodic flushing for streaming
+			buffer := make([]byte, 4096)
+			var totalBytes int64
+			for {
+				n, err := resp.Body.Read(buffer)
+				if n > 0 {
+					if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
+						log.Printf("!!! Error writing response for %s: %v !!!", path, writeErr)
+						break
+					}
+					totalBytes += int64(n)
+					// Flush periodically for streaming
+					flusher.Flush()
+				}
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					log.Printf("!!! Error reading from Ollama for %s: %v !!!", path, err)
+					break
+				}
+			}
+			flusher.Flush()
+			log.Printf("<<< Copied %d bytes from Ollama stream for %s <<<", totalBytes, path)
+		} else {
+			// Fallback to regular copy
+			bytesCopied, err := io.Copy(w, resp.Body)
+			if err != nil {
+				log.Printf("!!! Error copying response body for %s: %v !!!", path, err)
+			} else {
+				log.Printf("<<< Copied %d bytes from Ollama for %s <<<", bytesCopied, path)
+			}
+		}
+	} else {
+		// Non-streaming: regular copy
+		bytesCopied, err := io.Copy(w, resp.Body)
+		if err != nil {
+			log.Printf("!!! Error copying response body for %s: %v !!!", path, err)
+		} else {
+			log.Printf("<<< Copied %d bytes from Ollama for %s <<<", bytesCopied, path)
+		}
+		// Final flush
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
 }
 
 // handleProxy handles direct proxy requests (system management interfaces)
@@ -312,9 +376,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 // handleOpenAIChat handles OpenAI compatible chat completions endpoint
 func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
-	log.Printf("=== OpenAI Chat Completions endpoint: Method=%s, RemoteAddr=%s ===", r.Method, r.RemoteAddr)
+	log.Printf("=== OpenAI Chat Completions endpoint: %s %s, Method=%s, RemoteAddr=%s ===", 
+		r.Method, r.URL.Path, r.Method, r.RemoteAddr)
+	log.Printf("=== Full URL: %s ===", r.URL.String())
+	log.Printf("=== Headers: %v ===", r.Header)
 	
 	if r.Method == "OPTIONS" {
+		log.Printf("OpenAI Chat Completions: Handling OPTIONS preflight")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -330,6 +398,7 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	if r.Method != "POST" {
+		log.Printf("!!! OpenAI Chat Completions received unsupported method: %s !!!", r.Method)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -338,7 +407,7 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	log.Printf("*** Handling OpenAI Chat Completions POST request ***")
+	log.Printf("*** Handling OpenAI Chat Completions POST request from %s ***", r.RemoteAddr)
 	// Convert OpenAI format to Ollama format and proxy
 	s.handleOpenAIInferenceRequest(w, r)
 }
@@ -375,39 +444,61 @@ func (s *Server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
 
 // handleOpenAIInferenceRequest converts OpenAI format to Ollama format and proxies
 func (s *Server) handleOpenAIInferenceRequest(w http.ResponseWriter, r *http.Request) {
+	log.Printf(">>> Starting OpenAI request processing <<<")
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Printf("Failed to read OpenAI request body: %v", err)
+		log.Printf("!!! Failed to read OpenAI request body: %v !!!", err)
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
 	defer r.Body.Close()
 	
+	log.Printf(">>> OpenAI request body size: %d bytes <<<", len(body))
 	if len(body) == 0 {
+		log.Printf("!!! OpenAI request body is empty !!!")
 		http.Error(w, "Request body cannot be empty", http.StatusBadRequest)
 		return
 	}
 	
+	// Log request body preview
+	bodyPreview := string(body)
+	if len(bodyPreview) > 500 {
+		bodyPreview = bodyPreview[:500] + "..."
+	}
+	log.Printf(">>> OpenAI request body preview: %s <<<", bodyPreview)
+	
 	// Parse OpenAI format request
 	var openaiRequest map[string]interface{}
 	if err := json.Unmarshal(body, &openaiRequest); err != nil {
-		log.Printf("Failed to parse OpenAI JSON: %v, body: %s", err, string(body))
+		log.Printf("!!! Failed to parse OpenAI JSON: %v, body: %s !!!", err, string(body))
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 	
-	// Convert OpenAI format to Ollama format
-	messages, ok := openaiRequest["messages"].([]interface{})
+	// Check if messages exists and is valid
+	messagesRaw, ok := openaiRequest["messages"]
 	if !ok {
+		log.Printf("!!! Missing 'messages' field in OpenAI request !!!")
+		http.Error(w, "Missing 'messages' field", http.StatusBadRequest)
+		return
+	}
+	
+	messages, ok := messagesRaw.([]interface{})
+	if !ok {
+		log.Printf("!!! Invalid messages format in OpenAI request (not an array) !!!")
 		http.Error(w, "Invalid messages format", http.StatusBadRequest)
 		return
 	}
 	
+	log.Printf(">>> Parsed OpenAI request: model=%v, stream=%v, messages count=%d <<<",
+		openaiRequest["model"], openaiRequest["stream"], len(messages))
+	
 	// Convert messages
 	ollamaMessages := []map[string]interface{}{}
-	for _, msg := range messages {
+	for i, msg := range messages {
 		msgMap, ok := msg.(map[string]interface{})
 		if !ok {
+			log.Printf("!!! Skipping invalid message at index %d !!!", i)
 			continue
 		}
 		ollamaMessages = append(ollamaMessages, map[string]interface{}{
@@ -416,19 +507,35 @@ func (s *Server) handleOpenAIInferenceRequest(w http.ResponseWriter, r *http.Req
 		})
 	}
 	
+	if len(ollamaMessages) == 0 {
+		log.Printf("!!! No valid messages after conversion !!!")
+		http.Error(w, "No valid messages", http.StatusBadRequest)
+		return
+	}
+	
 	// Build Ollama request
+	stream := false
+	if streamVal, ok := openaiRequest["stream"]; ok {
+		if streamBool, ok := streamVal.(bool); ok {
+			stream = streamBool
+		}
+	}
+	
 	ollamaRequest := map[string]interface{}{
 		"model":    s.config.Model,
 		"messages": ollamaMessages,
-		"stream":  openaiRequest["stream"],
+		"stream":   stream,
 	}
 	
 	modifiedBody, err := json.Marshal(ollamaRequest)
 	if err != nil {
-		log.Printf("Failed to marshal Ollama request: %v", err)
+		log.Printf("!!! Failed to marshal Ollama request: %v !!!", err)
 		http.Error(w, "Failed to prepare request", http.StatusInternalServerError)
 		return
 	}
+	
+	log.Printf(">>> Converted to Ollama format: body size=%d bytes, model=%s, messages=%d, stream=%v <<<",
+		len(modifiedBody), s.config.Model, len(ollamaMessages), stream)
 	
 	// Collect headers
 	headers := make(map[string]string)
@@ -457,13 +564,80 @@ func (s *Server) handleOpenAIInferenceRequest(w http.ResponseWriter, r *http.Req
 	
 	log.Printf("<<< Ollama returned status %d for OpenAI request <<<", resp.StatusCode)
 	
-	// Copy response headers
+	// Copy response headers (except for ones that should be controlled by the response writer)
 	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
+		keyLower := strings.ToLower(key)
+		// Skip headers that should be controlled by the response writer
+		if keyLower != "content-length" && keyLower != "transfer-encoding" && keyLower != "connection" {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
 		}
 	}
 	
+	// For streaming responses, ensure proper headers
+	if stream {
+		// Don't set Content-Length for streaming responses
+		w.Header().Set("Transfer-Encoding", "chunked")
+		w.Header().Set("Connection", "keep-alive")
+	}
+	
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	
+	// Flush headers if possible (for streaming)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	
+	log.Printf(">>> Starting to copy response body from Ollama (stream=%v) <<<", stream)
+	
+	// For streaming responses, use buffered copy with periodic flushing
+	if stream {
+		if flusher, ok := w.(http.Flusher); ok {
+			// Use buffered copy for streaming
+			buffer := make([]byte, 4096)
+			var totalBytes int64
+			for {
+				n, err := resp.Body.Read(buffer)
+				if n > 0 {
+					if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
+						log.Printf("!!! Error writing response: %v !!!", writeErr)
+						break
+					}
+					totalBytes += int64(n)
+					// Flush periodically for streaming
+					flusher.Flush()
+				}
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					log.Printf("!!! Error reading from Ollama: %v !!!", err)
+					break
+				}
+			}
+			flusher.Flush()
+			log.Printf("<<< Copied %d bytes from Ollama stream response <<<", totalBytes)
+		} else {
+			// Fallback to regular copy if no Flusher
+			bytesCopied, err := io.Copy(w, resp.Body)
+			if err != nil {
+				log.Printf("!!! Error copying response body: %v !!!", err)
+			} else {
+				log.Printf("<<< Copied %d bytes from Ollama response <<<", bytesCopied)
+			}
+		}
+	} else {
+		// Non-streaming: regular copy
+		bytesCopied, err := io.Copy(w, resp.Body)
+		if err != nil {
+			log.Printf("!!! Error copying response body: %v !!!", err)
+		} else {
+			log.Printf("<<< Copied %d bytes from Ollama response <<<", bytesCopied)
+		}
+		// Final flush
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
 }
