@@ -123,16 +123,20 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	// Handle GET requests (used by OpenWebUI for health checks)
 	// OpenWebUI expects a dict/object response (with .get() method), not a list
+	// Return minimal info that indicates this is a valid chat endpoint
 	if r.Method == "GET" {
 		log.Printf("Chat endpoint received GET request from %s (health check)", r.RemoteAddr)
 		userAgent := r.UserAgent()
 		log.Printf("GET request UserAgent: %s, Referer: %s", userAgent, r.Header.Get("Referer"))
 		
-		// Return an empty object, not an array, so OpenWebUI can call .get() on it
+		// Return an object with some basic info - this helps OpenWebUI recognize the endpoint
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Allow", "POST, GET, OPTIONS")  // Explicitly state allowed methods
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{})
-		log.Printf("GET request responded with 200 OK (empty object)")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "ok",
+		})
+		log.Printf("GET request responded with 200 OK (status object)")
 		return
 	}
 	if r.Method != "POST" {
@@ -303,5 +307,163 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 
 	// Copy response body
+	io.Copy(w, resp.Body)
+}
+
+// handleOpenAIChat handles OpenAI compatible chat completions endpoint
+func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
+	log.Printf("=== OpenAI Chat Completions endpoint: Method=%s, RemoteAddr=%s ===", r.Method, r.RemoteAddr)
+	
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	
+	if r.Method == "GET" {
+		log.Printf("OpenAI Chat Completions received GET request (health check)")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "ok",
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Method not allowed",
+		})
+		return
+	}
+	
+	log.Printf("*** Handling OpenAI Chat Completions POST request ***")
+	// Convert OpenAI format to Ollama format and proxy
+	s.handleOpenAIInferenceRequest(w, r)
+}
+
+// handleOpenAIModels handles OpenAI compatible models endpoint
+func (s *Server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
+	log.Printf("=== OpenAI Models endpoint: Method=%s ===", r.Method)
+	
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	
+	if r.Method != "GET" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Return OpenAI format model list
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"data": []map[string]interface{}{
+			{
+				"id":      s.config.Model,
+				"object":  "model",
+				"created": 0,
+				"owned_by": "ollama",
+			},
+		},
+		"object": "list",
+	})
+}
+
+// handleOpenAIInferenceRequest converts OpenAI format to Ollama format and proxies
+func (s *Server) handleOpenAIInferenceRequest(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("Failed to read OpenAI request body: %v", err)
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+	
+	if len(body) == 0 {
+		http.Error(w, "Request body cannot be empty", http.StatusBadRequest)
+		return
+	}
+	
+	// Parse OpenAI format request
+	var openaiRequest map[string]interface{}
+	if err := json.Unmarshal(body, &openaiRequest); err != nil {
+		log.Printf("Failed to parse OpenAI JSON: %v, body: %s", err, string(body))
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	
+	// Convert OpenAI format to Ollama format
+	messages, ok := openaiRequest["messages"].([]interface{})
+	if !ok {
+		http.Error(w, "Invalid messages format", http.StatusBadRequest)
+		return
+	}
+	
+	// Convert messages
+	ollamaMessages := []map[string]interface{}{}
+	for _, msg := range messages {
+		msgMap, ok := msg.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		ollamaMessages = append(ollamaMessages, map[string]interface{}{
+			"role":    msgMap["role"],
+			"content": msgMap["content"],
+		})
+	}
+	
+	// Build Ollama request
+	ollamaRequest := map[string]interface{}{
+		"model":    s.config.Model,
+		"messages": ollamaMessages,
+		"stream":  openaiRequest["stream"],
+	}
+	
+	modifiedBody, err := json.Marshal(ollamaRequest)
+	if err != nil {
+		log.Printf("Failed to marshal Ollama request: %v", err)
+		http.Error(w, "Failed to prepare request", http.StatusInternalServerError)
+		return
+	}
+	
+	// Collect headers
+	headers := make(map[string]string)
+	for key, values := range r.Header {
+		if len(values) > 0 && !strings.HasPrefix(strings.ToLower(key), "host") {
+			headers[key] = values[0]
+		}
+	}
+	headers["Content-Type"] = "application/json"
+	
+	log.Printf(">>> Proxying OpenAI request to Ollama /api/chat (model: %s) <<<", s.config.Model)
+	
+	// Proxy to Ollama
+	resp, err := s.ollamaClient.ProxyRequest(
+		"POST",
+		"/api/chat",
+		bytes.NewReader(modifiedBody),
+		headers,
+	)
+	if err != nil {
+		log.Printf("!!! Failed to proxy OpenAI request to Ollama: %v !!!", err)
+		http.Error(w, "Failed to proxy request", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+	
+	log.Printf("<<< Ollama returned status %d for OpenAI request <<<", resp.StatusCode)
+	
+	// Copy response headers
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	
+	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }

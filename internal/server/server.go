@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -54,6 +55,14 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/api/version", s.handleProxy)
 	s.mux.HandleFunc("/api/ps", s.handleProxy)
 	s.mux.HandleFunc("/api/stop", s.handleProxy)
+	
+	// OpenWebUI uses /api/chat/completions (OpenAI compatible format)
+	s.mux.HandleFunc("/api/chat/completions", s.handleOpenAIChat)
+	s.mux.HandleFunc("/api/chat/completed", s.handleOpenAIChat)  // OpenWebUI completion callback
+	
+	// OpenAI compatible endpoints (some OpenWebUI versions may use these)
+	s.mux.HandleFunc("/v1/chat/completions", s.handleOpenAIChat)
+	s.mux.HandleFunc("/v1/models", s.handleOpenAIModels)
 
 	// 健康检查
 	s.mux.HandleFunc("/health", s.handleHealth)
