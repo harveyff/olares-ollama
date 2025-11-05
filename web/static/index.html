@@ -184,6 +184,15 @@
         <div id="api-url-container" class="hidden" style="margin-top: 20px; padding: 15px; background: #e7f3ff; border-radius: 8px; border-left: 4px solid #007bff;">
             <div style="font-size: 0.95em; color: #555; line-height: 1.6;">
                 The model is available through the API: <a id="api-url-link" href="#" target="_blank" style="color: #007bff; text-decoration: none; font-weight: 600;">-</a>
+                <button id="copy-btn" onclick="copyApiUrl()" style="background: none; border: none; cursor: pointer; margin-left: 8px; padding: 4px; vertical-align: middle;" title="Copy URL">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: #007bff;">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                </button>
+            </div>
+            <div style="font-size: 0.9em; color: #666; line-height: 1.6; margin-top: 10px;">
+                If the base URL doesn't work, append <span style="background: #fff3cd; color: #856404; padding: 2px 6px; border-radius: 4px; font-weight: 600; font-family: monospace;">/v1</span> to use the OpenAI‑compatible endpoint and try again.
             </div>
         </div>
     </div>
@@ -319,6 +328,30 @@
                     this.elements.apiUrlLink.href = appUrl;
                     this.elements.apiUrlLink.textContent = appUrl;
                 }
+            }
+        }
+        
+        // Copy API URL to clipboard
+        function copyApiUrl() {
+            const apiUrlLink = document.getElementById('api-url-link');
+            const url = apiUrlLink.textContent;
+            
+            if (url && url !== '-') {
+                navigator.clipboard.writeText(url).then(() => {
+                    // Show feedback
+                    const btn = document.getElementById('copy-btn');
+                    const originalHTML = btn.innerHTML;
+                    btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: #28a745;"><path d="M20 6L9 17l-5-5"></path></svg>';
+                    btn.style.color = '#28a745';
+                    
+                    setTimeout(() => {
+                        btn.innerHTML = originalHTML;
+                        btn.style.color = '';
+                    }, 2000);
+                }).catch(err => {
+                    console.error('Failed to copy:', err);
+                    alert('Failed to copy URL. Please copy manually: ' + url);
+                });
             }
         }
         
