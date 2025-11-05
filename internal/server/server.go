@@ -89,11 +89,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // corsMiddleware CORS中间件
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Log all API requests for debugging
+		// Log all requests for debugging (including scheme and host)
 		if strings.HasPrefix(r.URL.Path, "/api/") {
-			log.Printf("[CORS] ==== REQUEST START ==== %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
-			log.Printf("[CORS] Headers: Content-Type=%s, Origin=%s, User-Agent=%s", 
-				r.Header.Get("Content-Type"), r.Header.Get("Origin"), r.UserAgent())
+			log.Printf("[CORS] ==== REQUEST START ==== %s %s://%s%s from %s", 
+				r.Method, r.URL.Scheme, r.Host, r.URL.Path, r.RemoteAddr)
+			log.Printf("[CORS] Headers: Content-Type=%s, Origin=%s, User-Agent=%s, X-Forwarded-Proto=%s", 
+				r.Header.Get("Content-Type"), r.Header.Get("Origin"), r.UserAgent(), r.Header.Get("X-Forwarded-Proto"))
 		}
 		
 		// Set CORS headers on all responses

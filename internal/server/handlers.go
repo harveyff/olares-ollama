@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // handleTags handles model list requests, forwards from ollama and filters by configured models
@@ -564,22 +566,15 @@ func (s *Server) handleOpenAIInferenceRequest(w http.ResponseWriter, r *http.Req
 	
 	log.Printf("<<< Ollama returned status %d for OpenAI request <<<", resp.StatusCode)
 	
-	// Copy response headers (except for ones that should be controlled by the response writer)
-	for key, values := range resp.Header {
-		keyLower := strings.ToLower(key)
-		// Skip headers that should be controlled by the response writer
-		if keyLower != "content-length" && keyLower != "transfer-encoding" && keyLower != "connection" {
-			for _, value := range values {
-				w.Header().Add(key, value)
-			}
-		}
-	}
-	
-	// For streaming responses, ensure proper headers
+	// Set OpenAI-compatible response headers
 	if stream {
-		// Don't set Content-Length for streaming responses
+		// OpenAI streaming uses Server-Sent Events (SSE) format
+		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Transfer-Encoding", "chunked")
 		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("Cache-Control", "no-cache")
+	} else {
+		w.Header().Set("Content-Type", "application/json")
 	}
 	
 	w.WriteHeader(resp.StatusCode)
@@ -589,55 +584,201 @@ func (s *Server) handleOpenAIInferenceRequest(w http.ResponseWriter, r *http.Req
 		flusher.Flush()
 	}
 	
-	log.Printf(">>> Starting to copy response body from Ollama (stream=%v) <<<", stream)
+	log.Printf(">>> Starting to convert Ollama response to OpenAI format (stream=%v) <<<", stream)
 	
-	// For streaming responses, use buffered copy with periodic flushing
+	// Convert Ollama response to OpenAI format
 	if stream {
-		if flusher, ok := w.(http.Flusher); ok {
-			// Use buffered copy for streaming
-			buffer := make([]byte, 4096)
-			var totalBytes int64
-			for {
-				n, err := resp.Body.Read(buffer)
-				if n > 0 {
-					if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
-						log.Printf("!!! Error writing response: %v !!!", writeErr)
-						break
-					}
-					totalBytes += int64(n)
-					// Flush periodically for streaming
-					flusher.Flush()
-				}
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					log.Printf("!!! Error reading from Ollama: %v !!!", err)
-					break
-				}
-			}
-			flusher.Flush()
-			log.Printf("<<< Copied %d bytes from Ollama stream response <<<", totalBytes)
-		} else {
-			// Fallback to regular copy if no Flusher
-			bytesCopied, err := io.Copy(w, resp.Body)
-			if err != nil {
-				log.Printf("!!! Error copying response body: %v !!!", err)
-			} else {
-				log.Printf("<<< Copied %d bytes from Ollama response <<<", bytesCopied)
-			}
-		}
+		// Handle streaming response
+		s.convertOllamaStreamToOpenAI(w, resp.Body, s.config.Model)
 	} else {
-		// Non-streaming: regular copy
-		bytesCopied, err := io.Copy(w, resp.Body)
-		if err != nil {
-			log.Printf("!!! Error copying response body: %v !!!", err)
-		} else {
-			log.Printf("<<< Copied %d bytes from Ollama response <<<", bytesCopied)
-		}
-		// Final flush
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
+		// Handle non-streaming response
+		s.convertOllamaToOpenAI(w, resp.Body, s.config.Model)
+	}
+}
+
+// convertOllamaToOpenAI converts Ollama non-streaming response to OpenAI format
+func (s *Server) convertOllamaToOpenAI(w http.ResponseWriter, body io.Reader, modelName string) {
+	bodyBytes, err := io.ReadAll(body)
+	if err != nil {
+		log.Printf("!!! Error reading Ollama response: %v !!!", err)
+		http.Error(w, "Failed to read response", http.StatusInternalServerError)
+		return
+	}
+	
+	var ollamaResp map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &ollamaResp); err != nil {
+		log.Printf("!!! Error parsing Ollama response: %v, body: %s !!!", err, string(bodyBytes))
+		http.Error(w, "Failed to parse response", http.StatusInternalServerError)
+		return
+	}
+	
+	// Extract message content
+	message, ok := ollamaResp["message"].(map[string]interface{})
+	if !ok {
+		log.Printf("!!! Invalid Ollama response format: missing message !!!")
+		http.Error(w, "Invalid response format", http.StatusInternalServerError)
+		return
+	}
+	
+	content, _ := message["content"].(string)
+	role, _ := message["role"].(string)
+	if role == "" {
+		role = "assistant"
+	}
+	
+	// Create OpenAI format response
+	openAIResp := map[string]interface{}{
+		"id":      fmt.Sprintf("chatcmpl-%d", time.Now().Unix()),
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   modelName,
+		"choices": []map[string]interface{}{
+			{
+				"index": 0,
+				"message": map[string]interface{}{
+					"role":    role,
+					"content": content,
+				},
+				"finish_reason": "stop",
+			},
+		},
+		"usage": map[string]interface{}{
+			"prompt_tokens":     0,
+			"completion_tokens": 0,
+			"total_tokens":       0,
+		},
+	}
+	
+	// Try to extract token usage if available
+	if evalCount, ok := ollamaResp["eval_count"].(float64); ok {
+		openAIResp["usage"].(map[string]interface{})["completion_tokens"] = int(evalCount)
+		openAIResp["usage"].(map[string]interface{})["total_tokens"] = int(evalCount)
+	}
+	if promptEvalCount, ok := ollamaResp["prompt_eval_count"].(float64); ok {
+		openAIResp["usage"].(map[string]interface{})["prompt_tokens"] = int(promptEvalCount)
+		if total, ok := openAIResp["usage"].(map[string]interface{})["total_tokens"].(int); ok {
+			openAIResp["usage"].(map[string]interface{})["total_tokens"] = total + int(promptEvalCount)
 		}
 	}
+	
+	responseJSON, err := json.Marshal(openAIResp)
+	if err != nil {
+		log.Printf("!!! Error marshaling OpenAI response: %v !!!", err)
+		http.Error(w, "Failed to format response", http.StatusInternalServerError)
+		return
+	}
+	
+	w.Write(responseJSON)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	log.Printf("<<< Converted and sent OpenAI format response (%d bytes) <<<", len(responseJSON))
+}
+
+// convertOllamaStreamToOpenAI converts Ollama streaming response to OpenAI SSE format
+func (s *Server) convertOllamaStreamToOpenAI(w http.ResponseWriter, body io.Reader, modelName string) {
+	flusher, hasFlusher := w.(http.Flusher)
+	scanner := bufio.NewScanner(body)
+	responseID := fmt.Sprintf("chatcmpl-%d", time.Now().Unix())
+	created := time.Now().Unix()
+	var totalBytes int64
+	roleSent := false
+	
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		
+		var ollamaResp map[string]interface{}
+		if err := json.Unmarshal(line, &ollamaResp); err != nil {
+			log.Printf("!!! Error parsing Ollama stream line: %v, line: %s !!!", err, string(line))
+			continue
+		}
+		
+		// Check if done first
+		done, _ := ollamaResp["done"].(bool)
+		if done {
+			// Send final chunk with finish_reason
+			finalChunk := map[string]interface{}{
+				"id":      responseID,
+				"object":  "chat.completion.chunk",
+				"created": created,
+				"model":   modelName,
+				"choices": []map[string]interface{}{
+					{
+						"index":         0,
+						"delta":         map[string]interface{}{},
+						"finish_reason": "stop",
+					},
+				},
+			}
+			finalJSON, _ := json.Marshal(finalChunk)
+			w.Write([]byte(fmt.Sprintf("data: %s\n\n", finalJSON)))
+			w.Write([]byte("data: [DONE]\n\n"))
+			if hasFlusher {
+				flusher.Flush()
+			}
+			break
+		}
+		
+		// Extract message content (Ollama may send incremental content)
+		message, ok := ollamaResp["message"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		
+		content, _ := message["content"].(string)
+		role, _ := message["role"].(string)
+		
+		// Create OpenAI SSE chunk
+		delta := map[string]interface{}{}
+		if !roleSent && role != "" {
+			delta["role"] = role
+			roleSent = true
+		}
+		if content != "" {
+			delta["content"] = content
+		}
+		
+		// Only send chunk if there's content
+		if len(delta) > 0 {
+			chunk := map[string]interface{}{
+				"id":      responseID,
+				"object":  "chat.completion.chunk",
+				"created": created,
+				"model":   modelName,
+				"choices": []map[string]interface{}{
+					{
+						"index": 0,
+						"delta": delta,
+					},
+				},
+			}
+			
+			chunkJSON, err := json.Marshal(chunk)
+			if err != nil {
+				log.Printf("!!! Error marshaling chunk: %v !!!", err)
+				continue
+			}
+			
+			chunkLine := fmt.Sprintf("data: %s\n\n", chunkJSON)
+			written, err := w.Write([]byte(chunkLine))
+			if err != nil {
+				log.Printf("!!! Error writing chunk: %v !!!", err)
+				break
+			}
+			totalBytes += int64(written)
+			
+			if hasFlusher {
+				flusher.Flush()
+			}
+		}
+	}
+	
+	if err := scanner.Err(); err != nil {
+		log.Printf("!!! Error scanning stream: %v !!!", err)
+	}
+	
+	log.Printf("<<< Converted and sent OpenAI stream response (%d bytes) <<<", totalBytes)
 }
