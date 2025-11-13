@@ -218,17 +218,24 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	
 	if hasInput {
 		if inputArray, ok := inputRaw.([]interface{}); ok && len(inputArray) > 0 {
-			isBatch = len(inputArray) > 1
-			inputs = inputArray
-			log.Printf(">>> Batch embeddings request: %d inputs <<<", len(inputs))
+			// Array input: check if batch (multiple items) or single (one item)
+			if len(inputArray) > 1 {
+				isBatch = true
+				inputs = inputArray
+				log.Printf(">>> Batch embeddings request: %d inputs <<<", len(inputs))
+			} else {
+				// Single item in array - treat as single request
+				inputs = inputArray
+				log.Printf(">>> Single input in array format <<<")
+			}
 		} else if inputStr, ok := inputRaw.(string); ok {
-			// Single string input, convert to array
+			// Single string input
 			inputs = []interface{}{inputStr}
-			log.Printf(">>> Single string input converted to array <<<")
+			log.Printf(">>> Single string input <<<")
 		}
 	}
 	
-	// If batch request, process each input separately
+	// If batch request (multiple inputs), process each input separately
 	if isBatch && len(inputs) > 1 {
 		s.handleBatchEmbeddings(w, r, inputs, requestData)
 		return
@@ -857,9 +864,28 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 	
 	// Convert "input" to "prompt" for Ollama if needed
 	if input, ok := requestData["input"]; ok {
-		// Ollama uses "prompt" instead of "input"
-		requestData["prompt"] = input
-		// Keep "input" for compatibility, but Ollama will use "prompt"
+		// Ollama uses "prompt" instead of "input", and it must be a string
+		var promptStr string
+		if inputArray, ok := input.([]interface{}); ok && len(inputArray) > 0 {
+			// If input is an array, take the first element
+			if firstItem, ok := inputArray[0].(string); ok {
+				promptStr = firstItem
+			} else {
+				log.Printf("!!! Invalid input array element type: %T !!!", inputArray[0])
+				http.Error(w, "Invalid input format", http.StatusBadRequest)
+				return
+			}
+		} else if inputStr, ok := input.(string); ok {
+			// If input is already a string, use it directly
+			promptStr = inputStr
+		} else {
+			log.Printf("!!! Invalid input type: %T !!!", input)
+			http.Error(w, "Invalid input format", http.StatusBadRequest)
+			return
+		}
+		requestData["prompt"] = promptStr
+		// Remove "input" field as Ollama doesn't use it
+		delete(requestData, "input")
 	}
 	
 	// Re-serialize
