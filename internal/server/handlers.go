@@ -999,6 +999,16 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 		return
 	}
 	
+	// Log response preview for debugging
+	responsePreview := string(responseJSON)
+	if len(responsePreview) > 1000 {
+		responsePreview = responsePreview[:1000] + "..."
+	}
+	log.Printf(">>> OpenAI embeddings response preview: %s <<<", responsePreview)
+	dataArray := openAIResp["data"].([]map[string]interface{})
+	log.Printf(">>> Response structure: object=%v, data length=%d, first embedding length=%d <<<",
+		openAIResp["object"], len(dataArray), len(embedding))
+	
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(responseJSON)
 	log.Printf("<<< Converted and sent OpenAI embeddings format response (%d bytes, embedding size: %d) <<<", 
