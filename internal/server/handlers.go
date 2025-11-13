@@ -870,6 +870,13 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 		return
 	}
 	
+	// Log the request being sent to Ollama
+	bodyPreview := string(modifiedBody)
+	if len(bodyPreview) > 500 {
+		bodyPreview = bodyPreview[:500] + "..."
+	}
+	log.Printf(">>> Request to Ollama: %s <<<", bodyPreview)
+	
 	// Collect headers
 	headers := make(map[string]string)
 	for key, values := range r.Header {
@@ -896,9 +903,12 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 	defer resp.Body.Close()
 	
 	if resp.StatusCode != http.StatusOK {
+		// Read error response body for debugging
+		errorBody, _ := io.ReadAll(resp.Body)
 		log.Printf("!!! Ollama returned status %d for embeddings !!!", resp.StatusCode)
+		log.Printf("!!! Ollama error response: %s !!!", string(errorBody))
 		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
+		w.Write(errorBody)
 		return
 	}
 	
@@ -1098,6 +1108,13 @@ func (s *Server) handleOllamaEmbedding(w http.ResponseWriter, r *http.Request, b
 		return
 	}
 	
+	// Log the request being sent to Ollama
+	bodyPreview := string(modifiedBody)
+	if len(bodyPreview) > 500 {
+		bodyPreview = bodyPreview[:500] + "..."
+	}
+	log.Printf(">>> Request to Ollama: %s <<<", bodyPreview)
+	
 	// Collect headers
 	headers := make(map[string]string)
 	for key, values := range r.Header {
@@ -1124,9 +1141,12 @@ func (s *Server) handleOllamaEmbedding(w http.ResponseWriter, r *http.Request, b
 	defer resp.Body.Close()
 	
 	if resp.StatusCode != http.StatusOK {
+		// Read error response body for debugging
+		errorBody, _ := io.ReadAll(resp.Body)
 		log.Printf("!!! Ollama returned status %d for embeddings !!!", resp.StatusCode)
+		log.Printf("!!! Ollama error response: %s !!!", string(errorBody))
 		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
+		w.Write(errorBody)
 		return
 	}
 	
