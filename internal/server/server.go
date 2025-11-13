@@ -51,6 +51,7 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/api/generate", s.handleGenerate)
 	s.mux.HandleFunc("/api/chat", s.handleChat)
 	s.mux.HandleFunc("/api/embeddings", s.handleEmbeddings)
+	s.mux.HandleFunc("/api/embed", s.handleEmbeddings)  // OpenWebUI uses /api/embed
 	s.mux.HandleFunc("/api/version", s.handleProxy)
 	s.mux.HandleFunc("/api/ps", s.handleProxy)
 	s.mux.HandleFunc("/api/stop", s.handleProxy)
@@ -91,8 +92,24 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Log all requests for debugging (including scheme and host)
 		if strings.HasPrefix(r.URL.Path, "/api/") {
+			// Determine scheme (http or https)
+			scheme := r.URL.Scheme
+			if scheme == "" {
+				// Try to get from X-Forwarded-Proto header (common in reverse proxy setups)
+				if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+					scheme = proto
+				} else if r.TLS != nil {
+					scheme = "https"
+				} else {
+					scheme = "http"
+				}
+			}
+			host := r.Host
+			if host == "" {
+				host = r.Header.Get("Host")
+			}
 			log.Printf("[CORS] ==== REQUEST START ==== %s %s://%s%s from %s", 
-				r.Method, r.URL.Scheme, r.Host, r.URL.Path, r.RemoteAddr)
+				r.Method, scheme, host, r.URL.Path, r.RemoteAddr)
 			log.Printf("[CORS] Headers: Content-Type=%s, Origin=%s, User-Agent=%s, X-Forwarded-Proto=%s", 
 				r.Header.Get("Content-Type"), r.Header.Get("Origin"), r.UserAgent(), r.Header.Get("X-Forwarded-Proto"))
 		}
