@@ -933,22 +933,30 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 		resp.Header.Get("Content-Type"), resp.Header.Get("Transfer-Encoding"), resp.Header.Get("Content-Length"))
 	
 	// Copy response headers from Ollama (except for ones that should be controlled by the response writer)
+	// Note: We'll handle Content-Type separately to preserve charset (e.g., "application/json; charset=utf-8")
+	contentType := resp.Header.Get("Content-Type")
 	for key, values := range resp.Header {
 		keyLower := strings.ToLower(key)
 		// Skip headers that should be controlled by the response writer
 		// Also skip Transfer-Encoding for embeddings (should not be chunked/streaming)
-		if keyLower != "content-length" && keyLower != "transfer-encoding" && keyLower != "connection" {
+		// Skip Content-Type here, we'll set it explicitly to preserve charset
+		if keyLower != "content-length" && keyLower != "transfer-encoding" && keyLower != "connection" && keyLower != "content-type" {
 			for _, value := range values {
 				w.Header().Add(key, value)
 			}
 		}
 	}
 	
-	// Ensure Content-Type is application/json (not text/event-stream for SSE)
-	contentType := resp.Header.Get("Content-Type")
-	if contentType != "application/json" {
-		log.Printf(">>> Overriding Content-Type to application/json (was: %s) <<<", contentType)
+	// Copy Content-Type exactly from Ollama (including charset if present)
+	// This ensures exact match with Ollama's response format (e.g., "application/json; charset=utf-8")
+	if contentType != "" {
+		// Use Ollama's Content-Type exactly
+		w.Header().Set("Content-Type", contentType)
+		log.Printf(">>> Using Ollama Content-Type: %s <<<", contentType)
+	} else {
+		// Fallback if Ollama doesn't provide Content-Type
 		w.Header().Set("Content-Type", "application/json")
+		log.Printf(">>> Ollama didn't provide Content-Type, using default: application/json <<<")
 	}
 	
 	if resp.StatusCode != http.StatusOK {
@@ -1129,22 +1137,30 @@ func (s *Server) handleOllamaEmbedding(w http.ResponseWriter, r *http.Request, b
 		resp.Header.Get("Content-Type"), resp.Header.Get("Transfer-Encoding"), resp.Header.Get("Content-Length"))
 	
 	// Copy response headers from Ollama (except for ones that should be controlled by the response writer)
+	// Note: We'll handle Content-Type separately to preserve charset (e.g., "application/json; charset=utf-8")
+	contentType := resp.Header.Get("Content-Type")
 	for key, values := range resp.Header {
 		keyLower := strings.ToLower(key)
 		// Skip headers that should be controlled by the response writer
 		// Also skip Transfer-Encoding for embeddings (should not be chunked/streaming)
-		if keyLower != "content-length" && keyLower != "transfer-encoding" && keyLower != "connection" {
+		// Skip Content-Type here, we'll set it explicitly to preserve charset
+		if keyLower != "content-length" && keyLower != "transfer-encoding" && keyLower != "connection" && keyLower != "content-type" {
 			for _, value := range values {
 				w.Header().Add(key, value)
 			}
 		}
 	}
 	
-	// Ensure Content-Type is application/json (not text/event-stream for SSE)
-	contentType := resp.Header.Get("Content-Type")
-	if contentType != "application/json" {
-		log.Printf(">>> Overriding Content-Type to application/json (was: %s) <<<", contentType)
+	// Copy Content-Type exactly from Ollama (including charset if present)
+	// This ensures exact match with Ollama's response format (e.g., "application/json; charset=utf-8")
+	if contentType != "" {
+		// Use Ollama's Content-Type exactly
+		w.Header().Set("Content-Type", contentType)
+		log.Printf(">>> Using Ollama Content-Type: %s <<<", contentType)
+	} else {
+		// Fallback if Ollama doesn't provide Content-Type
 		w.Header().Set("Content-Type", "application/json")
+		log.Printf(">>> Ollama didn't provide Content-Type, using default: application/json <<<")
 	}
 	
 	if resp.StatusCode != http.StatusOK {
