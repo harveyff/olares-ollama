@@ -1029,7 +1029,6 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 	isOllamaFormat := r.URL.Path == "/api/embed"
 	
 	var responseJSON []byte
-	var err error
 	
 	if isOllamaFormat {
 		// Return Ollama format: {"embeddings": [[...]]}
@@ -1202,7 +1201,6 @@ func (s *Server) handleBatchEmbeddings(w http.ResponseWriter, r *http.Request, i
 	isOllamaFormat := r.URL.Path == "/api/embed"
 	
 	var responseJSON []byte
-	var err error
 	
 	if isOllamaFormat {
 		// Return Ollama format: {"embeddings": [[...], [...]]}
