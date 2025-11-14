@@ -977,13 +977,44 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 		}
 	}
 	
+	// Read response body first to log it
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("!!! Error reading Ollama embeddings response: %v !!!", err)
+		http.Error(w, "Failed to read response", http.StatusInternalServerError)
+		return
+	}
+	
+	// Log response body for debugging (first 500 chars)
+	bodyPreview := string(bodyBytes)
+	if len(bodyPreview) > 500 {
+		bodyPreview = bodyPreview[:500] + "..."
+	}
+	log.Printf(">>> Ollama embeddings response body preview: %s <<<", bodyPreview)
+	
+	// Parse to verify structure
+	var respData map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &respData); err == nil {
+		if embedding, ok := respData["embedding"]; ok {
+			if embeddingArray, ok := embedding.([]interface{}); ok {
+				log.Printf(">>> Response structure: has 'embedding' field with %d elements <<<", len(embeddingArray))
+			} else {
+				log.Printf(">>> Response structure: has 'embedding' field but type is %T <<<", embedding)
+			}
+		} else {
+			log.Printf(">>> Response structure: NO 'embedding' field, keys: %v <<<", getMapKeys(respData))
+		}
+	} else {
+		log.Printf(">>> Response structure: Failed to parse JSON: %v <<<", err)
+	}
+	
 	// Set status code
 	w.WriteHeader(resp.StatusCode)
 	
-	// Copy response body directly from Ollama (non-streaming, embeddings should be complete JSON)
-	bytesCopied, err := io.Copy(w, resp.Body)
+	// Write response body
+	bytesCopied, err := w.Write(bodyBytes)
 	if err != nil {
-		log.Printf("!!! Error copying Ollama embeddings response: %v !!!", err)
+		log.Printf("!!! Error writing Ollama embeddings response: %v !!!", err)
 		return
 	}
 	log.Printf("<<< Sent Ollama embeddings format response (%d bytes) <<<", bytesCopied)
@@ -1181,13 +1212,44 @@ func (s *Server) handleOllamaEmbedding(w http.ResponseWriter, r *http.Request, b
 		}
 	}
 	
+	// Read response body first to log it
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("!!! Error reading Ollama embeddings response: %v !!!", err)
+		http.Error(w, "Failed to read response", http.StatusInternalServerError)
+		return
+	}
+	
+	// Log response body for debugging (first 500 chars)
+	bodyPreview := string(bodyBytes)
+	if len(bodyPreview) > 500 {
+		bodyPreview = bodyPreview[:500] + "..."
+	}
+	log.Printf(">>> Ollama embeddings response body preview (Ollama format): %s <<<", bodyPreview)
+	
+	// Parse to verify structure
+	var respData map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &respData); err == nil {
+		if embedding, ok := respData["embedding"]; ok {
+			if embeddingArray, ok := embedding.([]interface{}); ok {
+				log.Printf(">>> Response structure: has 'embedding' field with %d elements <<<", len(embeddingArray))
+			} else {
+				log.Printf(">>> Response structure: has 'embedding' field but type is %T <<<", embedding)
+			}
+		} else {
+			log.Printf(">>> Response structure: NO 'embedding' field, keys: %v <<<", getMapKeys(respData))
+		}
+	} else {
+		log.Printf(">>> Response structure: Failed to parse JSON: %v <<<", err)
+	}
+	
 	// Set status code
 	w.WriteHeader(resp.StatusCode)
 	
-	// Copy response body directly from Ollama (non-streaming, embeddings should be complete JSON)
-	bytesCopied, err := io.Copy(w, resp.Body)
+	// Write response body
+	bytesCopied, err := w.Write(bodyBytes)
 	if err != nil {
-		log.Printf("!!! Error copying Ollama embeddings response: %v !!!", err)
+		log.Printf("!!! Error writing Ollama embeddings response: %v !!!", err)
 		return
 	}
 	log.Printf("<<< Sent Ollama embeddings format response (%d bytes) <<<", bytesCopied)
