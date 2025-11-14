@@ -992,32 +992,76 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 	}
 	log.Printf(">>> Ollama embeddings response body preview: %s <<<", bodyPreview)
 	
-	// Parse to verify structure
-	var respData map[string]interface{}
-	if err := json.Unmarshal(bodyBytes, &respData); err == nil {
-		if embedding, ok := respData["embedding"]; ok {
-			if embeddingArray, ok := embedding.([]interface{}); ok {
-				log.Printf(">>> Response structure: has 'embedding' field with %d elements <<<", len(embeddingArray))
-			} else {
-				log.Printf(">>> Response structure: has 'embedding' field but type is %T <<<", embedding)
+	// Parse Ollama response
+	var ollamaResp map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &ollamaResp); err != nil {
+		log.Printf("!!! Error parsing Ollama embeddings response: %v, body: %s !!!", err, string(bodyBytes))
+		http.Error(w, "Failed to parse response", http.StatusInternalServerError)
+		return
+	}
+	
+	// Extract embedding vector
+	embedding, ok := ollamaResp["embedding"].([]interface{})
+	if !ok {
+		// Try to convert if it's a different type
+		if embeddingFloat, ok := ollamaResp["embedding"].([]float64); ok {
+			embedding = make([]interface{}, len(embeddingFloat))
+			for i, v := range embeddingFloat {
+				embedding[i] = v
 			}
 		} else {
-			log.Printf(">>> Response structure: NO 'embedding' field, keys: %v <<<", getMapKeys(respData))
+			log.Printf("!!! Invalid embedding format in Ollama response: %T, keys: %v !!!", 
+				ollamaResp["embedding"], getMapKeys(ollamaResp))
+			http.Error(w, "Invalid embedding format", http.StatusInternalServerError)
+			return
 		}
-	} else {
-		log.Printf(">>> Response structure: Failed to parse JSON: %v <<<", err)
 	}
+	
+	log.Printf(">>> Extracted embedding vector: length=%d <<<", len(embedding))
+	
+	// Convert to OpenAI format (OpenWebUI expects this format)
+	openAIResp := map[string]interface{}{
+		"object": "list",
+		"data": []map[string]interface{}{
+			{
+				"object":    "embedding",
+				"embedding": embedding,
+				"index":     0,
+			},
+		},
+		"model": s.config.Model,
+		"usage": map[string]interface{}{
+			"prompt_tokens": 0,
+			"total_tokens":  0,
+		},
+	}
+	
+	// Try to extract usage if available
+	if promptEvalCount, ok := ollamaResp["prompt_eval_count"].(float64); ok {
+		openAIResp["usage"].(map[string]interface{})["prompt_tokens"] = int(promptEvalCount)
+		openAIResp["usage"].(map[string]interface{})["total_tokens"] = int(promptEvalCount)
+	}
+	
+	responseJSON, err := json.Marshal(openAIResp)
+	if err != nil {
+		log.Printf("!!! Error marshaling OpenAI embeddings response: %v !!!", err)
+		http.Error(w, "Failed to format response", http.StatusInternalServerError)
+		return
+	}
+	
+	log.Printf(">>> Converted to OpenAI format: data array with %d items, embedding length=%d <<<", 
+		len(openAIResp["data"].([]map[string]interface{})), len(embedding))
 	
 	// Set status code
 	w.WriteHeader(resp.StatusCode)
 	
-	// Write response body
-	bytesCopied, err := w.Write(bodyBytes)
+	// Write OpenAI format response
+	bytesCopied, err := w.Write(responseJSON)
 	if err != nil {
-		log.Printf("!!! Error writing Ollama embeddings response: %v !!!", err)
+		log.Printf("!!! Error writing OpenAI embeddings response: %v !!!", err)
 		return
 	}
-	log.Printf("<<< Sent Ollama embeddings format response (%d bytes) <<<", bytesCopied)
+	log.Printf("<<< Sent OpenAI embeddings format response (%d bytes) <<<", bytesCopied)
 }
 
 // getMapKeys returns the keys of a map as a slice of strings
@@ -1227,30 +1271,74 @@ func (s *Server) handleOllamaEmbedding(w http.ResponseWriter, r *http.Request, b
 	}
 	log.Printf(">>> Ollama embeddings response body preview (Ollama format): %s <<<", bodyPreview)
 	
-	// Parse to verify structure
-	var respData map[string]interface{}
-	if err := json.Unmarshal(bodyBytes, &respData); err == nil {
-		if embedding, ok := respData["embedding"]; ok {
-			if embeddingArray, ok := embedding.([]interface{}); ok {
-				log.Printf(">>> Response structure: has 'embedding' field with %d elements <<<", len(embeddingArray))
-			} else {
-				log.Printf(">>> Response structure: has 'embedding' field but type is %T <<<", embedding)
+	// Parse Ollama response
+	var ollamaResp map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &ollamaResp); err != nil {
+		log.Printf("!!! Error parsing Ollama embeddings response: %v, body: %s !!!", err, string(bodyBytes))
+		http.Error(w, "Failed to parse response", http.StatusInternalServerError)
+		return
+	}
+	
+	// Extract embedding vector
+	embedding, ok := ollamaResp["embedding"].([]interface{})
+	if !ok {
+		// Try to convert if it's a different type
+		if embeddingFloat, ok := ollamaResp["embedding"].([]float64); ok {
+			embedding = make([]interface{}, len(embeddingFloat))
+			for i, v := range embeddingFloat {
+				embedding[i] = v
 			}
 		} else {
-			log.Printf(">>> Response structure: NO 'embedding' field, keys: %v <<<", getMapKeys(respData))
+			log.Printf("!!! Invalid embedding format in Ollama response: %T, keys: %v !!!", 
+				ollamaResp["embedding"], getMapKeys(ollamaResp))
+			http.Error(w, "Invalid embedding format", http.StatusInternalServerError)
+			return
 		}
-	} else {
-		log.Printf(">>> Response structure: Failed to parse JSON: %v <<<", err)
 	}
+	
+	log.Printf(">>> Extracted embedding vector: length=%d <<<", len(embedding))
+	
+	// Convert to OpenAI format (OpenWebUI expects this format)
+	openAIResp := map[string]interface{}{
+		"object": "list",
+		"data": []map[string]interface{}{
+			{
+				"object":    "embedding",
+				"embedding": embedding,
+				"index":     0,
+			},
+		},
+		"model": s.config.Model,
+		"usage": map[string]interface{}{
+			"prompt_tokens": 0,
+			"total_tokens":  0,
+		},
+	}
+	
+	// Try to extract usage if available
+	if promptEvalCount, ok := ollamaResp["prompt_eval_count"].(float64); ok {
+		openAIResp["usage"].(map[string]interface{})["prompt_tokens"] = int(promptEvalCount)
+		openAIResp["usage"].(map[string]interface{})["total_tokens"] = int(promptEvalCount)
+	}
+	
+	responseJSON, err := json.Marshal(openAIResp)
+	if err != nil {
+		log.Printf("!!! Error marshaling OpenAI embeddings response: %v !!!", err)
+		http.Error(w, "Failed to format response", http.StatusInternalServerError)
+		return
+	}
+	
+	log.Printf(">>> Converted to OpenAI format: data array with %d items, embedding length=%d <<<", 
+		len(openAIResp["data"].([]map[string]interface{})), len(embedding))
 	
 	// Set status code
 	w.WriteHeader(resp.StatusCode)
 	
-	// Write response body
-	bytesCopied, err := w.Write(bodyBytes)
+	// Write OpenAI format response
+	bytesCopied, err := w.Write(responseJSON)
 	if err != nil {
-		log.Printf("!!! Error writing Ollama embeddings response: %v !!!", err)
+		log.Printf("!!! Error writing OpenAI embeddings response: %v !!!", err)
 		return
 	}
-	log.Printf("<<< Sent Ollama embeddings format response (%d bytes) <<<", bytesCopied)
+	log.Printf("<<< Sent OpenAI embeddings format response (%d bytes) <<<", bytesCopied)
 }
