@@ -863,6 +863,8 @@ func (s *Server) convertOllamaStreamToOpenAI(w http.ResponseWriter, body io.Read
 
 // handleSingleEmbedding handles a single embedding request and returns Ollama format
 func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, body []byte, requestData map[string]interface{}) {
+	var err error
+	
 	// Replace model parameter
 	requestData["model"] = s.config.Model
 	
@@ -1112,6 +1114,7 @@ func getMapKeys(m map[string]interface{}) []string {
 func (s *Server) handleBatchEmbeddings(w http.ResponseWriter, r *http.Request, inputs []interface{}, requestData map[string]interface{}) {
 	// Process each input separately
 	embeddings := [][]interface{}{}
+	var err error
 	
 	for idx, input := range inputs {
 		// Create single request for this input
