@@ -986,7 +986,7 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 	}
 	
 	// Log response body for debugging (first 500 chars)
-	bodyPreview := string(bodyBytes)
+	bodyPreview = string(bodyBytes)
 	if len(bodyPreview) > 500 {
 		bodyPreview = bodyPreview[:500] + "..."
 	}
@@ -1221,7 +1221,7 @@ func (s *Server) handleOllamaEmbedding(w http.ResponseWriter, r *http.Request, b
 	}
 	
 	// Log response body for debugging (first 500 chars)
-	bodyPreview := string(bodyBytes)
+	bodyPreview = string(bodyBytes)
 	if len(bodyPreview) > 500 {
 		bodyPreview = bodyPreview[:500] + "..."
 	}
