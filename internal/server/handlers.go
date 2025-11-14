@@ -928,6 +928,17 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 	}
 	defer resp.Body.Close()
 	
+	// Copy response headers from Ollama (except for ones that should be controlled by the response writer)
+	for key, values := range resp.Header {
+		keyLower := strings.ToLower(key)
+		// Skip headers that should be controlled by the response writer
+		if keyLower != "content-length" && keyLower != "transfer-encoding" && keyLower != "connection" {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+	}
+	
 	if resp.StatusCode != http.StatusOK {
 		// Read error response body for debugging
 		errorBody, _ := io.ReadAll(resp.Body)
@@ -938,31 +949,16 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 		return
 	}
 	
-	// Read Ollama response
-	bodyBytes, err := io.ReadAll(resp.Body)
+	// Set status code
+	w.WriteHeader(resp.StatusCode)
+	
+	// Copy response body directly from Ollama (streaming, no parsing)
+	bytesCopied, err := io.Copy(w, resp.Body)
 	if err != nil {
-		log.Printf("!!! Error reading Ollama embeddings response: %v !!!", err)
-		http.Error(w, "Failed to read response", http.StatusInternalServerError)
+		log.Printf("!!! Error copying Ollama embeddings response: %v !!!", err)
 		return
 	}
-	
-	var ollamaResp map[string]interface{}
-	if err := json.Unmarshal(bodyBytes, &ollamaResp); err != nil {
-		log.Printf("!!! Error parsing Ollama embeddings response: %v, body: %s !!!", err, string(bodyBytes))
-		http.Error(w, "Failed to parse response", http.StatusInternalServerError)
-		return
-	}
-	
-	// Return Ollama format directly (no conversion)
-	responsePreview := string(bodyBytes)
-	if len(responsePreview) > 1000 {
-		responsePreview = responsePreview[:1000] + "..."
-	}
-	log.Printf(">>> Ollama embeddings response preview: %s <<<", responsePreview)
-	
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(bodyBytes)
-	log.Printf("<<< Sent Ollama embeddings format response (%d bytes) <<<", len(bodyBytes))
+	log.Printf("<<< Sent Ollama embeddings format response (%d bytes) <<<", bytesCopied)
 }
 
 // getMapKeys returns the keys of a map as a slice of strings
@@ -1108,6 +1104,17 @@ func (s *Server) handleOllamaEmbedding(w http.ResponseWriter, r *http.Request, b
 	}
 	defer resp.Body.Close()
 	
+	// Copy response headers from Ollama (except for ones that should be controlled by the response writer)
+	for key, values := range resp.Header {
+		keyLower := strings.ToLower(key)
+		// Skip headers that should be controlled by the response writer
+		if keyLower != "content-length" && keyLower != "transfer-encoding" && keyLower != "connection" {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+	}
+	
 	if resp.StatusCode != http.StatusOK {
 		// Read error response body for debugging
 		errorBody, _ := io.ReadAll(resp.Body)
@@ -1118,29 +1125,14 @@ func (s *Server) handleOllamaEmbedding(w http.ResponseWriter, r *http.Request, b
 		return
 	}
 	
-	// Read Ollama response
-	bodyBytes, err := io.ReadAll(resp.Body)
+	// Set status code
+	w.WriteHeader(resp.StatusCode)
+	
+	// Copy response body directly from Ollama (streaming, no parsing)
+	bytesCopied, err := io.Copy(w, resp.Body)
 	if err != nil {
-		log.Printf("!!! Error reading Ollama embeddings response: %v !!!", err)
-		http.Error(w, "Failed to read response", http.StatusInternalServerError)
+		log.Printf("!!! Error copying Ollama embeddings response: %v !!!", err)
 		return
 	}
-	
-	var ollamaResp map[string]interface{}
-	if err := json.Unmarshal(bodyBytes, &ollamaResp); err != nil {
-		log.Printf("!!! Error parsing Ollama embeddings response: %v, body: %s !!!", err, string(bodyBytes))
-		http.Error(w, "Failed to parse response", http.StatusInternalServerError)
-		return
-	}
-	
-	// Return Ollama format directly (no conversion)
-	responsePreview := string(bodyBytes)
-	if len(responsePreview) > 1000 {
-		responsePreview = responsePreview[:1000] + "..."
-	}
-	log.Printf(">>> Ollama embeddings response preview: %s <<<", responsePreview)
-	
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(bodyBytes)
-	log.Printf("<<< Sent Ollama embeddings format response (%d bytes) <<<", len(bodyBytes))
+	log.Printf("<<< Sent Ollama embeddings format response (%d bytes) <<<", bytesCopied)
 }
