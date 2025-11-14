@@ -114,12 +114,19 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 				r.Header.Get("Content-Type"), r.Header.Get("Origin"), r.UserAgent(), r.Header.Get("X-Forwarded-Proto"))
 		}
 		
-		// Set CORS headers on all responses
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
-		w.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization, X-Requested-With")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
-		w.Header().Set("Access-Control-Max-Age", "3600")
+		// Set CORS headers on all responses, EXCEPT for embeddings endpoints
+		// Embeddings endpoints should match Ollama's response exactly (no CORS headers)
+		isEmbeddingsEndpoint := r.URL.Path == "/api/embed" || r.URL.Path == "/api/embeddings"
+		
+		if !isEmbeddingsEndpoint {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
+			w.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization, X-Requested-With")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Access-Control-Max-Age", "3600")
+		} else {
+			log.Printf("[CORS] Skipping CORS headers for embeddings endpoint: %s", r.URL.Path)
+		}
 
 		if r.Method == "OPTIONS" {
 			log.Printf("[CORS] OPTIONS preflight for %s - returning 204", r.URL.Path)

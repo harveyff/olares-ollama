@@ -928,15 +928,27 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 	}
 	defer resp.Body.Close()
 	
+	// Embeddings API should NOT be streaming - log headers for debugging
+	log.Printf(">>> Ollama embeddings response headers: Content-Type=%s, Transfer-Encoding=%s, Content-Length=%s <<<",
+		resp.Header.Get("Content-Type"), resp.Header.Get("Transfer-Encoding"), resp.Header.Get("Content-Length"))
+	
 	// Copy response headers from Ollama (except for ones that should be controlled by the response writer)
 	for key, values := range resp.Header {
 		keyLower := strings.ToLower(key)
 		// Skip headers that should be controlled by the response writer
+		// Also skip Transfer-Encoding for embeddings (should not be chunked/streaming)
 		if keyLower != "content-length" && keyLower != "transfer-encoding" && keyLower != "connection" {
 			for _, value := range values {
 				w.Header().Add(key, value)
 			}
 		}
+	}
+	
+	// Ensure Content-Type is application/json (not text/event-stream for SSE)
+	contentType := resp.Header.Get("Content-Type")
+	if contentType != "application/json" {
+		log.Printf(">>> Overriding Content-Type to application/json (was: %s) <<<", contentType)
+		w.Header().Set("Content-Type", "application/json")
 	}
 	
 	if resp.StatusCode != http.StatusOK {
@@ -949,10 +961,18 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 		return
 	}
 	
+	// Log all headers that will be sent to client (before WriteHeader)
+	log.Printf(">>> Final response headers to client: <<<")
+	for key, values := range w.Header() {
+		for _, value := range values {
+			log.Printf(">>>   %s: %s <<<", key, value)
+		}
+	}
+	
 	// Set status code
 	w.WriteHeader(resp.StatusCode)
 	
-	// Copy response body directly from Ollama (streaming, no parsing)
+	// Copy response body directly from Ollama (non-streaming, embeddings should be complete JSON)
 	bytesCopied, err := io.Copy(w, resp.Body)
 	if err != nil {
 		log.Printf("!!! Error copying Ollama embeddings response: %v !!!", err)
@@ -1104,15 +1124,27 @@ func (s *Server) handleOllamaEmbedding(w http.ResponseWriter, r *http.Request, b
 	}
 	defer resp.Body.Close()
 	
+	// Embeddings API should NOT be streaming - log headers for debugging
+	log.Printf(">>> Ollama embeddings response headers: Content-Type=%s, Transfer-Encoding=%s, Content-Length=%s <<<",
+		resp.Header.Get("Content-Type"), resp.Header.Get("Transfer-Encoding"), resp.Header.Get("Content-Length"))
+	
 	// Copy response headers from Ollama (except for ones that should be controlled by the response writer)
 	for key, values := range resp.Header {
 		keyLower := strings.ToLower(key)
 		// Skip headers that should be controlled by the response writer
+		// Also skip Transfer-Encoding for embeddings (should not be chunked/streaming)
 		if keyLower != "content-length" && keyLower != "transfer-encoding" && keyLower != "connection" {
 			for _, value := range values {
 				w.Header().Add(key, value)
 			}
 		}
+	}
+	
+	// Ensure Content-Type is application/json (not text/event-stream for SSE)
+	contentType := resp.Header.Get("Content-Type")
+	if contentType != "application/json" {
+		log.Printf(">>> Overriding Content-Type to application/json (was: %s) <<<", contentType)
+		w.Header().Set("Content-Type", "application/json")
 	}
 	
 	if resp.StatusCode != http.StatusOK {
@@ -1125,10 +1157,18 @@ func (s *Server) handleOllamaEmbedding(w http.ResponseWriter, r *http.Request, b
 		return
 	}
 	
+	// Log all headers that will be sent to client (before WriteHeader)
+	log.Printf(">>> Final response headers to client (Ollama format): <<<")
+	for key, values := range w.Header() {
+		for _, value := range values {
+			log.Printf(">>>   %s: %s <<<", key, value)
+		}
+	}
+	
 	// Set status code
 	w.WriteHeader(resp.StatusCode)
 	
-	// Copy response body directly from Ollama (streaming, no parsing)
+	// Copy response body directly from Ollama (non-streaming, embeddings should be complete JSON)
 	bytesCopied, err := io.Copy(w, resp.Body)
 	if err != nil {
 		log.Printf("!!! Error copying Ollama embeddings response: %v !!!", err)
