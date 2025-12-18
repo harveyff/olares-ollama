@@ -1128,17 +1128,28 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 		}
 	}
 	
+	// Check endpoint path to determine response format
+	// /api/embed is used by OpenWebUI for ollama type, expects Ollama format: {"embeddings": [[...]]}
+	// /api/embeddings or other endpoints expect OpenAI format: {"data": [{"embedding": [...]}]}
+	isOllamaFormat := r.URL.Path == "/api/embed"
+	
+	// If Ollama format and embeddings is empty array, return Ollama's original response directly
+	if isOllamaFormat && !found {
+		// Check if embeddings exists but is empty
+		if embeddingsArray, ok := ollamaResp["embeddings"].([]interface{}); ok && len(embeddingsArray) == 0 {
+			log.Printf(">>> Ollama returned empty embeddings array, returning original response <<<")
+			w.WriteHeader(resp.StatusCode)
+			w.Write(bodyBytes)
+			return
+		}
+	}
+	
 	if !found || len(embedding) == 0 {
 		log.Printf("!!! Invalid embedding format in Ollama response: embedding=%v, embeddings=%v, keys: %v !!!", 
 			ollamaResp["embedding"], ollamaResp["embeddings"], getMapKeys(ollamaResp))
 		http.Error(w, "Invalid embedding format or empty embedding", http.StatusInternalServerError)
 		return
 	}
-	
-	// Check endpoint path to determine response format
-	// /api/embed is used by OpenWebUI for ollama type, expects Ollama format: {"embeddings": [[...]]}
-	// /api/embeddings or other endpoints expect OpenAI format: {"data": [{"embedding": [...]}]}
-	isOllamaFormat := r.URL.Path == "/api/embed"
 	
 	var responseJSON []byte
 	
