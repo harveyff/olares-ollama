@@ -1151,22 +1151,29 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 	if embeddingsArray, ok := ollamaResp["embeddings"].([]interface{}); ok {
 		log.Printf(">>> [handleSingleEmbedding] Found 'embeddings' field, type: []interface{}, length: %d <<<", len(embeddingsArray))
 		if len(embeddingsArray) > 0 {
-		// Take the first embedding from the array
-		if firstEmbedding, ok := embeddingsArray[0].([]interface{}); ok {
-			embedding = firstEmbedding
-			found = true
-			log.Printf(">>> Extracted embedding from 'embeddings' array (length=%d) <<<", len(embedding))
-		} else if firstEmbeddingFloat, ok := embeddingsArray[0].([]float64); ok {
-			// Convert []float64 to []interface{}
-			embedding = make([]interface{}, len(firstEmbeddingFloat))
-			for i, v := range firstEmbeddingFloat {
-				embedding[i] = v
+			// Take the first embedding from the array
+			log.Printf(">>> [handleSingleEmbedding] embeddings[0] type: %T <<<", embeddingsArray[0])
+			if firstEmbedding, ok := embeddingsArray[0].([]interface{}); ok {
+				embedding = firstEmbedding
+				found = true
+				log.Printf(">>> [handleSingleEmbedding] ✓ Extracted embedding from 'embeddings' array[0] ([]interface{}, length=%d) <<<", len(embedding))
+			} else if firstEmbeddingFloat, ok := embeddingsArray[0].([]float64); ok {
+				// Convert []float64 to []interface{}
+				embedding = make([]interface{}, len(firstEmbeddingFloat))
+				for i, v := range firstEmbeddingFloat {
+					embedding[i] = v
+				}
+				found = true
+				log.Printf(">>> [handleSingleEmbedding] ✓ Extracted embedding from 'embeddings' array[0] ([]float64, length=%d) <<<", len(embedding))
+			} else {
+				log.Printf("!!! [handleSingleEmbedding] Invalid format in 'embeddings' array first element: %T, value preview: %v !!!", 
+					embeddingsArray[0], fmt.Sprintf("%v", embeddingsArray[0])[:100])
 			}
-			found = true
-			log.Printf(">>> Extracted embedding from 'embeddings' array (float64, length=%d) <<<", len(embedding))
 		} else {
-			log.Printf("!!! Invalid format in 'embeddings' array first element: %T !!!", embeddingsArray[0])
+			log.Printf(">>> [handleSingleEmbedding] 'embeddings' array is empty (length=0) <<<")
 		}
+	} else {
+		log.Printf(">>> [handleSingleEmbedding] No 'embeddings' field found or wrong type <<<")
 	}
 	
 	// If not found in "embeddings", try "embedding" (singular)
