@@ -1048,10 +1048,10 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 	log.Printf(">>> Proxying embeddings request to Ollama (model: %s) <<<", s.config.Model)
 	
 	// Proxy to Ollama
-	log.Printf(">>> [handleSingleEmbedding] Sending request to Ollama /api/embed, body size: %d bytes <<<", len(modifiedBody))
+	log.Printf(">>> [handleSingleEmbedding] Sending request to Ollama /api/embeddings, body size: %d bytes <<<", len(modifiedBody))
 	resp, err := s.ollamaClient.ProxyRequest(
 		"POST",
-		"/api/embed",
+		"/api/embeddings",
 		bytes.NewReader(modifiedBody),
 		headers,
 	)
@@ -1178,18 +1178,29 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 	
 	// If not found in "embeddings", try "embedding" (singular)
 	if !found {
-		if embeddingSingle, ok := ollamaResp["embedding"].([]interface{}); ok {
-			embedding = embeddingSingle
-			found = true
-			log.Printf(">>> Extracted embedding from 'embedding' field (length=%d) <<<", len(embedding))
-		} else if embeddingFloat, ok := ollamaResp["embedding"].([]float64); ok {
-			// Convert []float64 to []interface{}
-			embedding = make([]interface{}, len(embeddingFloat))
-			for i, v := range embeddingFloat {
-				embedding[i] = v
+		log.Printf(">>> [handleSingleEmbedding] Trying 'embedding' field (singular)... <<<")
+		embeddingRaw := ollamaResp["embedding"]
+		if embeddingRaw == nil {
+			log.Printf(">>> [handleSingleEmbedding] 'embedding' field is nil <<<")
+		} else {
+			log.Printf(">>> [handleSingleEmbedding] 'embedding' field exists, type: %T <<<", embeddingRaw)
+			if embeddingSingle, ok := embeddingRaw.([]interface{}); ok {
+				embedding = embeddingSingle
+				found = true
+				log.Printf(">>> [handleSingleEmbedding] ✓ Extracted embedding from 'embedding' field ([]interface{}, length=%d) <<<", len(embedding))
+			} else if embeddingFloat, ok := embeddingRaw.([]float64); ok {
+				// Convert []float64 to []interface{}
+				log.Printf(">>> [handleSingleEmbedding] Converting []float64 to []interface{}, length: %d <<<", len(embeddingFloat))
+				embedding = make([]interface{}, len(embeddingFloat))
+				for i, v := range embeddingFloat {
+					embedding[i] = v
+				}
+				found = true
+				log.Printf(">>> [handleSingleEmbedding] ✓ Extracted embedding from 'embedding' field ([]float64, length=%d) <<<", len(embedding))
+			} else {
+				log.Printf("!!! [handleSingleEmbedding] 'embedding' field has unexpected type: %T, value preview: %v !!!", 
+					embeddingRaw, fmt.Sprintf("%v", embeddingRaw)[:200])
 			}
-			found = true
-			log.Printf(">>> Extracted embedding from 'embedding' field (float64, length=%d) <<<", len(embedding))
 		}
 	}
 	
@@ -1201,47 +1212,29 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 	log.Printf(">>> [handleSingleEmbedding] Response format decision: isOllamaFormat=%v (path=%s), found=%v, embedding length=%d <<<", 
 		isOllamaFormat, r.URL.Path, found, len(embedding))
 	
-	// If Ollama format and embeddings is empty array, return an array with one empty embedding
-	// This ensures OpenWebUI receives the expected format even when Ollama returns empty array
+	// If Ollama format and embeddings is empty array, return an error
+	// ChromaDB cannot handle empty embedding vectors, so we should return an error instead
 	if isOllamaFormat && !found {
 		log.Printf(">>> [handleSingleEmbedding] Handling empty embeddings case for Ollama format... <<<")
 		// Check if embeddings exists but is empty
 		if embeddingsArray, ok := ollamaResp["embeddings"].([]interface{}); ok && len(embeddingsArray) == 0 {
-			// Check if the original request had multiple inputs (batch request)
-			if inputRaw, ok := requestData["input"]; ok {
-				if inputArray, ok := inputRaw.([]interface{}); ok && len(inputArray) > 1 {
-					// This is a batch request, return empty embeddings array with correct length
-					log.Printf(">>> [handleSingleEmbedding] Ollama returned empty embeddings array for batch request (%d inputs), returning empty array with correct length <<<", len(inputArray))
-					emptyEmbeddings := make([][]interface{}, len(inputArray))
-					for i := range emptyEmbeddings {
-						emptyEmbeddings[i] = []interface{}{}
-					}
-					responseJSON, err := json.Marshal(map[string]interface{}{
-						"embeddings": emptyEmbeddings,
-					})
-					if err != nil {
-						log.Printf("!!! [handleSingleEmbedding] Error marshaling empty embeddings response: %v !!!", err)
-						http.Error(w, "Failed to format response", http.StatusInternalServerError)
-						return
-					}
-					w.WriteHeader(resp.StatusCode)
-					w.Write(responseJSON)
-					return
-				}
+			// Ollama returned empty embeddings array - this indicates the model failed to generate embeddings
+			// We should return an error instead of empty embeddings, as ChromaDB cannot handle empty vectors
+			log.Printf("!!! [handleSingleEmbedding] Ollama returned empty embeddings array - model failed to generate embeddings !!!")
+			log.Printf("!!! [handleSingleEmbedding] This may indicate: 1) Model issue, 2) Request format issue, 3) Model not properly loaded !!!")
+			
+			// Return error response in Ollama format
+			errorResponse := map[string]interface{}{
+				"error": "Failed to generate embeddings: Ollama returned empty embeddings array. Please check if the model is properly loaded and the request format is correct.",
 			}
-			// Single request with empty embeddings, return array with one empty embedding
-			// This ensures OpenWebUI receives {"embeddings": [[]]} instead of {"embeddings": []}
-			log.Printf(">>> [handleSingleEmbedding] Ollama returned empty embeddings array for single request, returning array with one empty embedding <<<")
-			emptyEmbeddings := [][]interface{}{[]interface{}{}}
-			responseJSON, err := json.Marshal(map[string]interface{}{
-				"embeddings": emptyEmbeddings,
-			})
+			responseJSON, err := json.Marshal(errorResponse)
 			if err != nil {
-				log.Printf("!!! [handleSingleEmbedding] Error marshaling empty embeddings response: %v !!!", err)
-				http.Error(w, "Failed to format response", http.StatusInternalServerError)
+				log.Printf("!!! [handleSingleEmbedding] Error marshaling error response: %v !!!", err)
+				http.Error(w, "Failed to generate embeddings", http.StatusInternalServerError)
 				return
 			}
-			w.WriteHeader(resp.StatusCode)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
 			w.Write(responseJSON)
 			return
 		}
@@ -1381,11 +1374,11 @@ func (s *Server) handleBatchEmbeddings(w http.ResponseWriter, r *http.Request, i
 		headers["Content-Type"] = "application/json"
 		
 		// Proxy to Ollama
-		log.Printf(">>> [handleBatchEmbeddings] Sending request %d/%d to Ollama /api/embed, body size: %d bytes <<<", 
+		log.Printf(">>> [handleBatchEmbeddings] Sending request %d/%d to Ollama /api/embeddings, body size: %d bytes <<<", 
 			idx+1, len(inputs), len(modifiedBody))
 		resp, err := s.ollamaClient.ProxyRequest(
 			"POST",
-			"/api/embed",
+			"/api/embeddings",
 			bytes.NewReader(modifiedBody),
 			headers,
 		)
@@ -1580,7 +1573,7 @@ func (s *Server) handleOllamaEmbedding(w http.ResponseWriter, r *http.Request, b
 	// Proxy to Ollama
 	resp, err := s.ollamaClient.ProxyRequest(
 		"POST",
-		"/api/embed",
+		"/api/embeddings",
 		bytes.NewReader(modifiedBody),
 		headers,
 	)
