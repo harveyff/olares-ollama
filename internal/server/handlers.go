@@ -506,19 +506,99 @@ func (s *Server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	// Return OpenAI format model list
+	// Get model list from Ollama
+	headers := make(map[string]string)
+	for key, values := range r.Header {
+		if len(values) > 0 && !strings.HasPrefix(strings.ToLower(key), "host") {
+			headers[key] = values[0]
+		}
+	}
+	
+	// Proxy request to Ollama /api/tags
+	resp, err := s.ollamaClient.ProxyRequest(
+		"GET",
+		"/api/tags",
+		nil,
+		headers,
+	)
+	if err != nil {
+		log.Printf("Failed to proxy request to ollama: %v", err)
+		http.Error(w, "Failed to proxy request", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		// Copy error response
+		for key, values := range resp.Header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+		return
+	}
+	
+	// Parse response from ollama
+	var ollamaResponse map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&ollamaResponse); err != nil {
+		log.Printf("Failed to decode ollama response: %v", err)
+		http.Error(w, "Failed to decode response", http.StatusInternalServerError)
+		return
+	}
+	
+	// Convert Ollama format to OpenAI format
+	models, ok := ollamaResponse["models"].([]interface{})
+	if !ok {
+		log.Printf("Invalid models format in ollama response")
+		http.Error(w, "Invalid response format", http.StatusInternalServerError)
+		return
+	}
+	
+	openAIData := []map[string]interface{}{}
+	for _, model := range models {
+		modelMap, ok := model.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		
+		// Get model name
+		modelName, ok := modelMap["name"].(string)
+		if !ok {
+			continue
+		}
+		
+		// Filter: only keep the configured model
+		if modelName != s.config.Model {
+			continue
+		}
+		
+		// Convert modified_at to Unix timestamp
+		var created int64 = 0
+		if modifiedAtStr, ok := modelMap["modified_at"].(string); ok {
+			if modifiedAt, err := time.Parse(time.RFC3339, modifiedAtStr); err == nil {
+				created = modifiedAt.Unix()
+			}
+		} else if modifiedAtFloat, ok := modelMap["modified_at"].(float64); ok {
+			// Sometimes modified_at might be a timestamp directly
+			created = int64(modifiedAtFloat)
+		}
+		
+		openAIData = append(openAIData, map[string]interface{}{
+			"id":       modelName,
+			"object":   "model",
+			"created":  created,
+			"owned_by": "library",
+		})
+	}
+	
+	// Return OpenAI format with "object" field first
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"data": []map[string]interface{}{
-			{
-				"id":      s.config.Model,
-				"object":  "model",
-				"created": 0,
-				"owned_by": "ollama",
-			},
-		},
 		"object": "list",
+		"data":   openAIData,
 	})
 }
 
@@ -923,7 +1003,7 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 	// Proxy to Ollama
 	resp, err := s.ollamaClient.ProxyRequest(
 		"POST",
-		"/api/embeddings",
+		"/api/embed",
 		bytes.NewReader(modifiedBody),
 		headers,
 	)
@@ -1146,7 +1226,7 @@ func (s *Server) handleBatchEmbeddings(w http.ResponseWriter, r *http.Request, i
 		// Proxy to Ollama
 		resp, err := s.ollamaClient.ProxyRequest(
 			"POST",
-			"/api/embeddings",
+			"/api/embed",
 			bytes.NewReader(modifiedBody),
 			headers,
 		)
@@ -1291,7 +1371,7 @@ func (s *Server) handleOllamaEmbedding(w http.ResponseWriter, r *http.Request, b
 	// Proxy to Ollama
 	resp, err := s.ollamaClient.ProxyRequest(
 		"POST",
-		"/api/embeddings",
+		"/api/embed",
 		bytes.NewReader(modifiedBody),
 		headers,
 	)
