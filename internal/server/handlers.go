@@ -1087,23 +1087,53 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 	}
 	
 	// Extract embedding vector
-	embedding, ok := ollamaResp["embedding"].([]interface{})
-	if !ok {
-		// Try to convert if it's a different type
-		if embeddingFloat, ok := ollamaResp["embedding"].([]float64); ok {
+	// Ollama may return either "embedding" (single) or "embeddings" (array)
+	var embedding []interface{}
+	var found bool
+	
+	// First try "embeddings" (plural) - array format
+	if embeddingsArray, ok := ollamaResp["embeddings"].([]interface{}); ok && len(embeddingsArray) > 0 {
+		// Take the first embedding from the array
+		if firstEmbedding, ok := embeddingsArray[0].([]interface{}); ok {
+			embedding = firstEmbedding
+			found = true
+			log.Printf(">>> Extracted embedding from 'embeddings' array (length=%d) <<<", len(embedding))
+		} else if firstEmbeddingFloat, ok := embeddingsArray[0].([]float64); ok {
+			// Convert []float64 to []interface{}
+			embedding = make([]interface{}, len(firstEmbeddingFloat))
+			for i, v := range firstEmbeddingFloat {
+				embedding[i] = v
+			}
+			found = true
+			log.Printf(">>> Extracted embedding from 'embeddings' array (float64, length=%d) <<<", len(embedding))
+		} else {
+			log.Printf("!!! Invalid format in 'embeddings' array first element: %T !!!", embeddingsArray[0])
+		}
+	}
+	
+	// If not found in "embeddings", try "embedding" (singular)
+	if !found {
+		if embeddingSingle, ok := ollamaResp["embedding"].([]interface{}); ok {
+			embedding = embeddingSingle
+			found = true
+			log.Printf(">>> Extracted embedding from 'embedding' field (length=%d) <<<", len(embedding))
+		} else if embeddingFloat, ok := ollamaResp["embedding"].([]float64); ok {
+			// Convert []float64 to []interface{}
 			embedding = make([]interface{}, len(embeddingFloat))
 			for i, v := range embeddingFloat {
 				embedding[i] = v
 			}
-		} else {
-			log.Printf("!!! Invalid embedding format in Ollama response: %T, keys: %v !!!", 
-				ollamaResp["embedding"], getMapKeys(ollamaResp))
-			http.Error(w, "Invalid embedding format", http.StatusInternalServerError)
-			return
+			found = true
+			log.Printf(">>> Extracted embedding from 'embedding' field (float64, length=%d) <<<", len(embedding))
 		}
 	}
 	
-	log.Printf(">>> Extracted embedding vector: length=%d <<<", len(embedding))
+	if !found || len(embedding) == 0 {
+		log.Printf("!!! Invalid embedding format in Ollama response: embedding=%v, embeddings=%v, keys: %v !!!", 
+			ollamaResp["embedding"], ollamaResp["embeddings"], getMapKeys(ollamaResp))
+		http.Error(w, "Invalid embedding format or empty embedding", http.StatusInternalServerError)
+		return
+	}
 	
 	// Check endpoint path to determine response format
 	// /api/embed is used by OpenWebUI for ollama type, expects Ollama format: {"embeddings": [[...]]}
@@ -1256,17 +1286,45 @@ func (s *Server) handleBatchEmbeddings(w http.ResponseWriter, r *http.Request, i
 		}
 		
 		// Extract embedding vector
-		embedding, ok := ollamaResp["embedding"].([]interface{})
-		if !ok {
-			if embeddingFloat, ok := ollamaResp["embedding"].([]float64); ok {
+		// Ollama may return either "embedding" (single) or "embeddings" (array)
+		var embedding []interface{}
+		var found bool
+		
+		// First try "embeddings" (plural) - array format
+		if embeddingsArray, ok := ollamaResp["embeddings"].([]interface{}); ok && len(embeddingsArray) > 0 {
+			// Take the first embedding from the array
+			if firstEmbedding, ok := embeddingsArray[0].([]interface{}); ok {
+				embedding = firstEmbedding
+				found = true
+			} else if firstEmbeddingFloat, ok := embeddingsArray[0].([]float64); ok {
+				// Convert []float64 to []interface{}
+				embedding = make([]interface{}, len(firstEmbeddingFloat))
+				for i, v := range firstEmbeddingFloat {
+					embedding[i] = v
+				}
+				found = true
+			}
+		}
+		
+		// If not found in "embeddings", try "embedding" (singular)
+		if !found {
+			if embeddingSingle, ok := ollamaResp["embedding"].([]interface{}); ok {
+				embedding = embeddingSingle
+				found = true
+			} else if embeddingFloat, ok := ollamaResp["embedding"].([]float64); ok {
+				// Convert []float64 to []interface{}
 				embedding = make([]interface{}, len(embeddingFloat))
 				for i, v := range embeddingFloat {
 					embedding[i] = v
 				}
-			} else {
-				log.Printf("!!! Invalid embedding format in batch response %d !!!", idx)
-				continue
+				found = true
 			}
+		}
+		
+		if !found || len(embedding) == 0 {
+			log.Printf("!!! Invalid embedding format in batch response %d: embedding=%v, embeddings=%v !!!", 
+				idx, ollamaResp["embedding"], ollamaResp["embeddings"])
+			continue
 		}
 		
 		embeddings = append(embeddings, embedding)
@@ -1455,23 +1513,53 @@ func (s *Server) handleOllamaEmbedding(w http.ResponseWriter, r *http.Request, b
 	}
 	
 	// Extract embedding vector
-	embedding, ok := ollamaResp["embedding"].([]interface{})
-	if !ok {
-		// Try to convert if it's a different type
-		if embeddingFloat, ok := ollamaResp["embedding"].([]float64); ok {
+	// Ollama may return either "embedding" (single) or "embeddings" (array)
+	var embedding []interface{}
+	var found bool
+	
+	// First try "embeddings" (plural) - array format
+	if embeddingsArray, ok := ollamaResp["embeddings"].([]interface{}); ok && len(embeddingsArray) > 0 {
+		// Take the first embedding from the array
+		if firstEmbedding, ok := embeddingsArray[0].([]interface{}); ok {
+			embedding = firstEmbedding
+			found = true
+			log.Printf(">>> Extracted embedding from 'embeddings' array (length=%d) <<<", len(embedding))
+		} else if firstEmbeddingFloat, ok := embeddingsArray[0].([]float64); ok {
+			// Convert []float64 to []interface{}
+			embedding = make([]interface{}, len(firstEmbeddingFloat))
+			for i, v := range firstEmbeddingFloat {
+				embedding[i] = v
+			}
+			found = true
+			log.Printf(">>> Extracted embedding from 'embeddings' array (float64, length=%d) <<<", len(embedding))
+		} else {
+			log.Printf("!!! Invalid format in 'embeddings' array first element: %T !!!", embeddingsArray[0])
+		}
+	}
+	
+	// If not found in "embeddings", try "embedding" (singular)
+	if !found {
+		if embeddingSingle, ok := ollamaResp["embedding"].([]interface{}); ok {
+			embedding = embeddingSingle
+			found = true
+			log.Printf(">>> Extracted embedding from 'embedding' field (length=%d) <<<", len(embedding))
+		} else if embeddingFloat, ok := ollamaResp["embedding"].([]float64); ok {
+			// Convert []float64 to []interface{}
 			embedding = make([]interface{}, len(embeddingFloat))
 			for i, v := range embeddingFloat {
 				embedding[i] = v
 			}
-		} else {
-			log.Printf("!!! Invalid embedding format in Ollama response: %T, keys: %v !!!", 
-				ollamaResp["embedding"], getMapKeys(ollamaResp))
-			http.Error(w, "Invalid embedding format", http.StatusInternalServerError)
-			return
+			found = true
+			log.Printf(">>> Extracted embedding from 'embedding' field (float64, length=%d) <<<", len(embedding))
 		}
 	}
 	
-	log.Printf(">>> Extracted embedding vector: length=%d <<<", len(embedding))
+	if !found || len(embedding) == 0 {
+		log.Printf("!!! Invalid embedding format in Ollama response: embedding=%v, embeddings=%v, keys: %v !!!", 
+			ollamaResp["embedding"], ollamaResp["embeddings"], getMapKeys(ollamaResp))
+		http.Error(w, "Invalid embedding format or empty embedding", http.StatusInternalServerError)
+		return
+	}
 	
 	// Convert to OpenAI format (OpenWebUI expects this format)
 	openAIResp := map[string]interface{}{
