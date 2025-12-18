@@ -1201,8 +1201,8 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 	log.Printf(">>> [handleSingleEmbedding] Response format decision: isOllamaFormat=%v (path=%s), found=%v, embedding length=%d <<<", 
 		isOllamaFormat, r.URL.Path, found, len(embedding))
 	
-	// If Ollama format and embeddings is empty array, check if this is a batch request
-	// For batch requests, we should return an array with the expected number of empty embeddings
+	// If Ollama format and embeddings is empty array, return an array with one empty embedding
+	// This ensures OpenWebUI receives the expected format even when Ollama returns empty array
 	if isOllamaFormat && !found {
 		log.Printf(">>> [handleSingleEmbedding] Handling empty embeddings case for Ollama format... <<<")
 		// Check if embeddings exists but is empty
@@ -1211,7 +1211,7 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 			if inputRaw, ok := requestData["input"]; ok {
 				if inputArray, ok := inputRaw.([]interface{}); ok && len(inputArray) > 1 {
 					// This is a batch request, return empty embeddings array with correct length
-					log.Printf(">>> Ollama returned empty embeddings array for batch request (%d inputs), returning empty array with correct length <<<", len(inputArray))
+					log.Printf(">>> [handleSingleEmbedding] Ollama returned empty embeddings array for batch request (%d inputs), returning empty array with correct length <<<", len(inputArray))
 					emptyEmbeddings := make([][]interface{}, len(inputArray))
 					for i := range emptyEmbeddings {
 						emptyEmbeddings[i] = []interface{}{}
@@ -1220,7 +1220,7 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 						"embeddings": emptyEmbeddings,
 					})
 					if err != nil {
-						log.Printf("!!! Error marshaling empty embeddings response: %v !!!", err)
+						log.Printf("!!! [handleSingleEmbedding] Error marshaling empty embeddings response: %v !!!", err)
 						http.Error(w, "Failed to format response", http.StatusInternalServerError)
 						return
 					}
@@ -1229,10 +1229,20 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 					return
 				}
 			}
-			// Single request with empty embeddings, return original response
-			log.Printf(">>> Ollama returned empty embeddings array for single request, returning original response <<<")
+			// Single request with empty embeddings, return array with one empty embedding
+			// This ensures OpenWebUI receives {"embeddings": [[]]} instead of {"embeddings": []}
+			log.Printf(">>> [handleSingleEmbedding] Ollama returned empty embeddings array for single request, returning array with one empty embedding <<<")
+			emptyEmbeddings := [][]interface{}{[]interface{}{}}
+			responseJSON, err := json.Marshal(map[string]interface{}{
+				"embeddings": emptyEmbeddings,
+			})
+			if err != nil {
+				log.Printf("!!! [handleSingleEmbedding] Error marshaling empty embeddings response: %v !!!", err)
+				http.Error(w, "Failed to format response", http.StatusInternalServerError)
+				return
+			}
 			w.WriteHeader(resp.StatusCode)
-			w.Write(bodyBytes)
+			w.Write(responseJSON)
 			return
 		}
 	}
