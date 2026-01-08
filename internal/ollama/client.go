@@ -81,12 +81,44 @@ func (c *Client) ModelExists(modelName string) (bool, error) {
 		return false, err
 	}
 
+	// 记录所有模型名称用于调试
+	modelNames := make([]string, 0, len(modelResp.Models))
+	for _, model := range modelResp.Models {
+		modelNames = append(modelNames, model.Name)
+	}
+	log.Printf("Checking model '%s' against available models: %v", modelName, modelNames)
+
+	// 精确匹配
 	for _, model := range modelResp.Models {
 		if model.Name == modelName {
+			log.Printf("Model '%s' found (exact match)", modelName)
 			return true, nil
 		}
 	}
 
+	// 前缀匹配：如果查找的是 "model:tag"，也匹配 "model"
+	// 例如 "cogito:14b" 应该匹配 "cogito"
+	if strings.Contains(modelName, ":") {
+		baseName := strings.Split(modelName, ":")[0]
+		for _, model := range modelResp.Models {
+			// 匹配 "model" 或 "model:" 开头的
+			if model.Name == baseName || strings.HasPrefix(model.Name, baseName+":") {
+				log.Printf("Model '%s' found (prefix match: '%s' matches '%s')", modelName, modelName, model.Name)
+				return true, nil
+			}
+		}
+	}
+
+	// 反向匹配：如果查找的是 "model"，也匹配 "model:tag"
+	// 例如查找 "cogito" 应该匹配 "cogito:14b"
+	for _, model := range modelResp.Models {
+		if strings.HasPrefix(model.Name, modelName+":") || model.Name == modelName {
+			log.Printf("Model '%s' found (reverse prefix match: '%s' matches '%s')", modelName, modelName, model.Name)
+			return true, nil
+		}
+	}
+
+	log.Printf("Model '%s' not found in model list", modelName)
 	return false, nil
 }
 
