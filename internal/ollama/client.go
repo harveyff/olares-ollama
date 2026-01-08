@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -176,6 +177,9 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 
 	// 读取流式响应
 	decoder := json.NewDecoder(resp.Body)
+	var lastPullResp PullResponse
+	var gotSuccess bool
+	
 	for {
 		var pullResp PullResponse
 		if err := decoder.Decode(&pullResp); err == io.EOF {
@@ -184,6 +188,8 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 			progressUpdater.UpdateProgress("error", 0, 0, modelName)
 			return err
 		}
+
+		lastPullResp = pullResp
 
 		// 更新进度
 		progressUpdater.UpdateProgress(pullResp.Status, pullResp.Completed, pullResp.Total, modelName)
@@ -199,12 +205,55 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 		}
 
 		if pullResp.Status == "success" {
-			progressUpdater.UpdateProgress("success", pullResp.Completed, pullResp.Total, modelName)
+			gotSuccess = true
+			progressUpdater.UpdateProgress("verifying", pullResp.Completed, pullResp.Total, modelName)
 			break
 		}
 	}
 
-	return nil
+	// 如果没有收到 success 状态，检查是否是因为流提前结束
+	if !gotSuccess {
+		log.Printf("Warning: Download stream ended without 'success' status for model %s", modelName)
+		// 继续验证，因为有时流可能提前结束但下载已完成
+	}
+
+	// 验证模型是否真的下载成功并可用
+	// Ollama 可能在部分文件失败时仍返回 success，需要验证
+	log.Printf("Verifying model %s is complete and usable...", modelName)
+	maxVerifyAttempts := 5
+	verifyDelay := 2 * time.Second
+	
+	for attempt := 1; attempt <= maxVerifyAttempts; attempt++ {
+		// 等待一段时间让 Ollama 完成文件写入
+		if attempt > 1 {
+			log.Printf("Verification attempt %d/%d for model %s (waiting %v)...", 
+				attempt, maxVerifyAttempts, modelName, verifyDelay)
+			time.Sleep(verifyDelay)
+			verifyDelay *= 2 // 指数退避
+		}
+		
+		exists, err := c.ModelExists(modelName)
+		if err != nil {
+			log.Printf("Error verifying model %s: %v", modelName, err)
+			if attempt == maxVerifyAttempts {
+				progressUpdater.UpdateProgress("error", 0, 0, modelName)
+				return fmt.Errorf("failed to verify model after download: %w", err)
+			}
+			continue
+		}
+		
+		if exists {
+			log.Printf("Model %s verified successfully", modelName)
+			progressUpdater.UpdateProgress("completed", lastPullResp.Completed, lastPullResp.Total, modelName)
+			return nil
+		}
+		
+		log.Printf("Model %s not found in model list (attempt %d/%d)", modelName, attempt, maxVerifyAttempts)
+	}
+	
+	// 验证失败
+	progressUpdater.UpdateProgress("error", 0, 0, modelName)
+	return fmt.Errorf("model %s download reported success but model is not available in Ollama", modelName)
 }
 
 // ProxyRequest 代理请求到Ollama

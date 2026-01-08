@@ -84,7 +84,7 @@ func ensureModel(client *ollama.Client, modelName string, progressManager *downl
 
 	if exists {
 		log.Printf("Model %s is already available", modelName)
-		progressManager.UpdateProgress("complete", 0, 0, modelName)
+		progressManager.UpdateProgress("completed", 0, 0, modelName)
 		return nil
 	}
 
@@ -110,9 +110,27 @@ func ensureModel(client *ollama.Client, modelName string, progressManager *downl
 			continue
 		}
 
-		// 下载成功
-		log.Printf("Model %s downloaded successfully", modelName)
-		progressManager.UpdateProgress("success", 0, 0, modelName)
+		// PullModelWithProgress 已经验证了模型可用性
+		// 再次确认模型存在（双重验证）
+		log.Printf("Double-checking model %s availability...", modelName)
+		exists, err := client.ModelExists(modelName)
+		if err != nil {
+			log.Printf("Warning: Failed to verify model after download: %v", err)
+			// 不返回错误，因为 PullModelWithProgress 已经验证过了
+		} else if !exists {
+			log.Printf("Warning: Model %s not found after download, may need retry", modelName)
+			if attempt < maxRetries {
+				log.Printf("Retrying download...")
+				time.Sleep(5 * time.Second)
+				continue
+			}
+			progressManager.UpdateProgress("error", 0, 0, modelName)
+			return fmt.Errorf("model %s download completed but model is not available", modelName)
+		}
+
+		// 下载成功并验证通过
+		log.Printf("Model %s downloaded and verified successfully", modelName)
+		progressManager.UpdateProgress("completed", 0, 0, modelName)
 		return nil
 	}
 

@@ -182,8 +182,12 @@
                 <span id="current-status" class="detail-value">-</span>
             </div>
             <div class="detail-item">
-                <span class="detail-label">Last Update:</span>
-                <span id="last-update" class="detail-value">-</span>
+                <span class="detail-label">Completed At:</span>
+                <span id="completed-at" class="detail-value">-</span>
+            </div>
+            <div class="detail-item">
+                <span class="detail-label">Duration:</span>
+                <span id="duration" class="detail-value">-</span>
             </div>
         </div>
         
@@ -199,6 +203,9 @@
             </div>
             <div style="font-size: 0.9em; color: #666; line-height: 1.6; margin-top: 10px;">
                 If the base URL doesn't work, append <span style="background: #fff3cd; color: #856404; padding: 2px 6px; border-radius: 4px; font-weight: 600; font-family: monospace;">/v1</span> to use the OpenAI‑compatible endpoint and try again.
+            </div>
+            <div style="font-size: 0.9em; color: #666; line-height: 1.6; margin-top: 10px;">
+                To enable external access, select this app in Settings > Application and adjust the Authentication level under Entrances.
             </div>
         </div>
     </div>
@@ -219,7 +226,8 @@
                     details: document.getElementById('details'),
                     modelName: document.getElementById('model-name'),
                     currentStatus: document.getElementById('current-status'),
-                    lastUpdate: document.getElementById('last-update'),
+                    completedAt: document.getElementById('completed-at'),
+                    duration: document.getElementById('duration'),
                     apiUrlContainer: document.getElementById('api-url-container'),
                     apiUrlLink: document.getElementById('api-url-link')
                 };
@@ -244,7 +252,7 @@
                     this.updateProgress(data);
                     
                     // If download complete, reduce polling frequency
-                    if (data.status === 'success' || data.status === 'complete') {
+                    if (data.status === 'completed' || data.status === 'success' || data.status === 'complete') {
                         setTimeout(() => this.fetchProgress(), this.pollInterval * 3); // Slow down polling
                     } else {
                         setTimeout(() => this.fetchProgress(), this.pollInterval);
@@ -259,18 +267,63 @@
             }
             
             updateProgress(data) {
-                const { status, progress, total, completed, model_name, timestamp } = data;
+                const { status, progress, total, completed, model_name, timestamp, completed_at, duration } = data;
                 
                 // Update basic information
                 this.elements.modelName.textContent = model_name || '-';
-                this.elements.currentStatus.textContent = status || '-';
-                this.elements.lastUpdate.textContent = new Date(timestamp * 1000).toLocaleString();
+                
+                // 格式化状态显示：将 completed 显示为 Completed
+                let statusDisplay = status || '-';
+                if (status === 'completed') {
+                    statusDisplay = 'Completed';
+                } else if (status === 'downloading') {
+                    statusDisplay = 'Downloading';
+                } else if (status === 'verifying') {
+                    statusDisplay = 'Verifying';
+                } else if (status === 'error') {
+                    statusDisplay = 'Error';
+                } else if (status === 'starting') {
+                    statusDisplay = 'Starting';
+                }
+                this.elements.currentStatus.textContent = statusDisplay;
+                
+                // 完成时间：如果有 completed_at，使用它；否则使用 timestamp（但只在未完成时显示）
+                if (completed_at) {
+                    this.elements.completedAt.textContent = new Date(completed_at * 1000).toLocaleString();
+                } else if (status === 'completed') {
+                    // 如果状态是 completed 但没有 completed_at，使用 timestamp
+                    this.elements.completedAt.textContent = new Date(timestamp * 1000).toLocaleString();
+                } else {
+                    this.elements.completedAt.textContent = '-';
+                }
+                
+                // 用时：如果有 duration，格式化显示为英文格式
+                if (duration !== undefined && duration !== null) {
+                    const hours = Math.floor(duration / 3600);
+                    const minutes = Math.floor((duration % 3600) / 60);
+                    const seconds = duration % 60;
+                    
+                    let durationParts = [];
+                    if (hours > 0) {
+                        durationParts.push(`${hours} ${hours === 1 ? 'hour' : 'hours'}`);
+                    }
+                    if (minutes > 0) {
+                        durationParts.push(`${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`);
+                    }
+                    if (seconds > 0 || durationParts.length === 0) {
+                        durationParts.push(`${seconds} ${seconds === 1 ? 'second' : 'seconds'}`);
+                    }
+                    
+                    this.elements.duration.textContent = durationParts.join(' ');
+                } else {
+                    this.elements.duration.textContent = '-';
+                }
                 
                 // Show details
                 this.elements.details.classList.remove('hidden');
                 
                 // Update interface based on status
-                if (status === 'success' || status === 'complete') {
+                if (status === 'completed' || status === 'success' || status === 'complete') {
                     this.updateStatus(`Model ${model_name} download completed!`, 'success');
                     this.elements.progressContainer.classList.add('hidden');
                     // Display API URL if available
