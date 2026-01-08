@@ -122,6 +122,69 @@ func (c *Client) ModelExists(modelName string) (bool, error) {
 	return false, nil
 }
 
+// ModelUsable checks if model is usable by trying to call it
+// This is a fallback when model exists in files but not in the list
+func (c *Client) ModelUsable(modelName string) (bool, error) {
+	// Try to call /api/show to check if model is usable
+	showReq := map[string]interface{}{
+		"name": modelName,
+	}
+	jsonData, err := json.Marshal(showReq)
+	if err != nil {
+		return false, err
+	}
+
+	resp, err := c.httpClient.Post(
+		c.baseURL+"/api/show",
+		"application/json",
+		bytes.NewBuffer(jsonData),
+	)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	// If status is OK, model is usable even if not in list
+	if resp.StatusCode == http.StatusOK {
+		log.Printf("Model '%s' is usable (verified via /api/show)", modelName)
+		return true, nil
+	}
+
+	// Try a simple generate request as fallback
+	generateReq := map[string]interface{}{
+		"model":  modelName,
+		"prompt": "test",
+		"stream": false,
+	}
+	jsonData, err = json.Marshal(generateReq)
+	if err != nil {
+		return false, err
+	}
+
+	// Use a short timeout for this test
+	testClient := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+	resp, err = testClient.Post(
+		c.baseURL+"/api/generate",
+		"application/json",
+		bytes.NewBuffer(jsonData),
+	)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	// If we get a response (even if error about prompt), model exists
+	// 400/404 means model doesn't exist, 200/500 might mean model exists but prompt issue
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusInternalServerError {
+		log.Printf("Model '%s' appears to be usable (verified via /api/generate, status: %d)", modelName, resp.StatusCode)
+		return true, nil
+	}
+
+	return false, nil
+}
+
 // PullModel downloads model
 func (c *Client) PullModel(modelName string) error {
 	pullReq := PullRequest{Name: modelName}
@@ -211,10 +274,17 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 	decoder := json.NewDecoder(resp.Body)
 	var lastPullResp PullResponse
 	var gotSuccess bool
+	var successCount int
+	
+	// 使用带超时的读取，避免无限等待
+	// 但要注意：我们不能简单地设置超时，因为下载可能需要很长时间
+	// 所以继续读取直到 EOF，但记录 success 状态
 	
 	for {
 		var pullResp PullResponse
 		if err := decoder.Decode(&pullResp); err == io.EOF {
+			// 流结束
+			log.Printf("Download stream ended (EOF)")
 			break
 		} else if err != nil {
 			progressUpdater.UpdateProgress("error", 0, 0, modelName)
@@ -236,10 +306,13 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 			fmt.Println()
 		}
 
+		// 记录 success 状态，但不要立即退出
+		// Ollama 可能会发送多个 success 状态，或者 success 后还有更多数据
 		if pullResp.Status == "success" {
 			gotSuccess = true
-			progressUpdater.UpdateProgress("verifying", pullResp.Completed, pullResp.Total, modelName)
-			break
+			successCount++
+			log.Printf("Received 'success' status (count: %d), continuing to read stream...", successCount)
+			// 不要 break，继续读取直到 EOF
 		}
 	}
 
@@ -247,6 +320,8 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 	if !gotSuccess {
 		log.Printf("Warning: Download stream ended without 'success' status for model %s", modelName)
 		// 继续验证，因为有时流可能提前结束但下载已完成
+	} else {
+		log.Printf("Download stream completed with 'success' status (received %d times)", successCount)
 	}
 
 	// 验证模型是否真的下载成功并可用
@@ -296,6 +371,19 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 		}
 		
 		log.Printf("Model %s not found in model list (attempt %d/%d)", modelName, attempt, maxVerifyAttempts)
+		
+		// 如果模型不在列表中，尝试通过实际调用验证模型是否可用
+		// 有时文件已下载但 Ollama 还没注册到列表中
+		if attempt >= 3 {
+			log.Printf("Model not in list, trying to verify via API call...")
+			usable, err := c.ModelUsable(modelName)
+			if err == nil && usable {
+				log.Printf("Model %s verified as usable via API call (files exist but not registered in list)", modelName)
+				progressUpdater.UpdateProgress("completed", lastPullResp.Completed, lastPullResp.Total, modelName)
+				return nil
+			}
+		}
+		
 		// 更新状态，显示正在验证
 		progressUpdater.UpdateProgress("verifying", lastPullResp.Completed, lastPullResp.Total, modelName)
 	}
