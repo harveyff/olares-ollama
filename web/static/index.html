@@ -276,14 +276,23 @@
                 let statusDisplay = status || '-';
                 if (status === 'completed') {
                     statusDisplay = 'Completed';
-                } else if (status === 'downloading') {
+                } else if (status === 'downloading' || status === 'pulling') {
                     statusDisplay = 'Downloading';
-                } else if (status === 'verifying') {
+                } else if (status === 'verifying' || status === 'verifying sha256 digest') {
                     statusDisplay = 'Verifying';
+                } else if (status === 'writing manifest') {
+                    statusDisplay = 'Writing Manifest';
+                } else if (status === 'pulling manifest') {
+                    statusDisplay = 'Pulling Manifest';
                 } else if (status === 'error') {
                     statusDisplay = 'Error';
                 } else if (status === 'starting') {
                     statusDisplay = 'Starting';
+                } else if (status && status.includes('pulling')) {
+                    statusDisplay = 'Downloading';
+                } else if (status) {
+                    // 如果有状态但不在已知列表中，显示原始状态（首字母大写）
+                    statusDisplay = status.charAt(0).toUpperCase() + status.slice(1);
                 }
                 this.elements.currentStatus.textContent = statusDisplay;
                 
@@ -343,21 +352,37 @@
                     this.updateStatus(`Verifying model file integrity...`, 'loading');
                     // 如果已经有100%进度，保持100%；否则显示95%
                     const verifyProgress = progress >= 100 ? 100 : 95;
-                    this.showProgress(verifyProgress, 0, 0);
+                    this.showProgress(verifyProgress, completed, total);
                 } else if (status === 'writing manifest') {
                     this.updateStatus(`Writing model manifest file...`, 'loading');
                     // 如果已经有100%进度，保持100%；否则显示98%
                     const verifyProgress = progress >= 100 ? 100 : 98;
-                    this.showProgress(verifyProgress, 0, 0);
+                    this.showProgress(verifyProgress, completed, total);
+                } else if (status === 'pulling manifest') {
+                    this.updateStatus(`Pulling model manifest...`, 'loading');
+                    this.showProgress(progress, completed, total);
                 } else if (status === 'error') {
                     this.updateStatus('Download error occurred', 'error');
                     this.elements.progressContainer.classList.add('hidden');
                 } else if (status === 'starting') {
                     this.updateStatus(`Preparing to download model ${model_name}...`, 'loading');
                     this.showProgress(0, 0, 0);
+                } else if (status && status.trim() !== '') {
+                    // 对于其他未知状态，显示状态文本和进度
+                    this.updateStatus(`Status: ${statusDisplay}`, 'loading');
+                    // 如果有进度信息，显示进度；否则显示当前进度或默认值
+                    if (total > 0 && completed >= 0) {
+                        this.showProgress(progress, completed, total);
+                    } else if (progress > 0) {
+                        this.showProgress(progress, completed, total);
+                    } else {
+                        // 对于验证/解压等阶段，显示一个合理的进度值
+                        this.showProgress(95, 0, 0);
+                    }
                 } else {
-                    this.updateStatus(`Status: ${status}`, 'loading');
-                    this.showProgress(progress, completed, total);
+                    // 如果没有状态，显示默认信息
+                    this.updateStatus(`Processing...`, 'loading');
+                    this.showProgress(progress || 0, completed || 0, total || 0);
                 }
             }
             

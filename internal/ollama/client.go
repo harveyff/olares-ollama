@@ -259,6 +259,7 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 	
 	// 第一次验证前等待，给 Ollama 时间完成模型注册
 	log.Printf("Waiting %v before first verification attempt...", initialDelay)
+	progressUpdater.UpdateProgress("verifying", lastPullResp.Completed, lastPullResp.Total, modelName)
 	time.Sleep(initialDelay)
 	
 	for attempt := 1; attempt <= maxVerifyAttempts; attempt++ {
@@ -266,6 +267,8 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 		if attempt > 1 {
 			log.Printf("Verification attempt %d/%d for model %s (waiting %v)...", 
 				attempt, maxVerifyAttempts, modelName, verifyDelay)
+			// 更新状态显示验证进度
+			progressUpdater.UpdateProgress("verifying", lastPullResp.Completed, lastPullResp.Total, modelName)
 			time.Sleep(verifyDelay)
 			// 指数退避，但最大不超过30秒
 			verifyDelay *= 2
@@ -281,6 +284,8 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 				progressUpdater.UpdateProgress("error", 0, 0, modelName)
 				return fmt.Errorf("failed to verify model after download: %w", err)
 			}
+			// 继续验证，更新状态
+			progressUpdater.UpdateProgress("verifying", lastPullResp.Completed, lastPullResp.Total, modelName)
 			continue
 		}
 		
@@ -291,6 +296,8 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 		}
 		
 		log.Printf("Model %s not found in model list (attempt %d/%d)", modelName, attempt, maxVerifyAttempts)
+		// 更新状态，显示正在验证
+		progressUpdater.UpdateProgress("verifying", lastPullResp.Completed, lastPullResp.Total, modelName)
 	}
 	
 	// 验证失败
