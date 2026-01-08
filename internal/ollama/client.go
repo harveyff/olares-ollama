@@ -219,17 +219,27 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 
 	// 验证模型是否真的下载成功并可用
 	// Ollama 可能在部分文件失败时仍返回 success，需要验证
+	// Ollama 下载完成后需要一些时间来注册模型到列表中
 	log.Printf("Verifying model %s is complete and usable...", modelName)
-	maxVerifyAttempts := 5
-	verifyDelay := 2 * time.Second
+	maxVerifyAttempts := 10  // 增加验证次数
+	initialDelay := 5 * time.Second  // 第一次验证前等待5秒
+	verifyDelay := 3 * time.Second   // 初始延迟3秒
+	
+	// 第一次验证前等待，给 Ollama 时间完成模型注册
+	log.Printf("Waiting %v before first verification attempt...", initialDelay)
+	time.Sleep(initialDelay)
 	
 	for attempt := 1; attempt <= maxVerifyAttempts; attempt++ {
-		// 等待一段时间让 Ollama 完成文件写入
+		// 等待一段时间让 Ollama 完成文件写入和模型注册
 		if attempt > 1 {
 			log.Printf("Verification attempt %d/%d for model %s (waiting %v)...", 
 				attempt, maxVerifyAttempts, modelName, verifyDelay)
 			time.Sleep(verifyDelay)
-			verifyDelay *= 2 // 指数退避
+			// 指数退避，但最大不超过30秒
+			verifyDelay *= 2
+			if verifyDelay > 30*time.Second {
+				verifyDelay = 30 * time.Second
+			}
 		}
 		
 		exists, err := c.ModelExists(modelName)
@@ -243,7 +253,7 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 		}
 		
 		if exists {
-			log.Printf("Model %s verified successfully", modelName)
+			log.Printf("Model %s verified successfully on attempt %d/%d", modelName, attempt, maxVerifyAttempts)
 			progressUpdater.UpdateProgress("completed", lastPullResp.Completed, lastPullResp.Total, modelName)
 			return nil
 		}

@@ -90,30 +90,6 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // corsMiddleware CORS中间件
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Log all requests for debugging (including scheme and host)
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			// Determine scheme (http or https)
-			scheme := r.URL.Scheme
-			if scheme == "" {
-				// Try to get from X-Forwarded-Proto header (common in reverse proxy setups)
-				if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-					scheme = proto
-				} else if r.TLS != nil {
-					scheme = "https"
-				} else {
-					scheme = "http"
-				}
-			}
-			host := r.Host
-			if host == "" {
-				host = r.Header.Get("Host")
-			}
-			log.Printf("[CORS] ==== REQUEST START ==== %s %s://%s%s from %s", 
-				r.Method, scheme, host, r.URL.Path, r.RemoteAddr)
-			log.Printf("[CORS] Headers: Content-Type=%s, Origin=%s, User-Agent=%s, X-Forwarded-Proto=%s", 
-				r.Header.Get("Content-Type"), r.Header.Get("Origin"), r.UserAgent(), r.Header.Get("X-Forwarded-Proto"))
-		}
-		
 		// Set CORS headers on all responses, EXCEPT for embeddings endpoints
 		// Embeddings endpoints should match Ollama's response exactly (no CORS headers)
 		isEmbeddingsEndpoint := r.URL.Path == "/api/embed" || r.URL.Path == "/api/embeddings"
@@ -124,14 +100,10 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization, X-Requested-With")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Max-Age", "3600")
-		} else {
-			log.Printf("[CORS] Skipping CORS headers for embeddings endpoint: %s", r.URL.Path)
 		}
 
 		if r.Method == "OPTIONS" {
-			log.Printf("[CORS] OPTIONS preflight for %s - returning 204", r.URL.Path)
 			w.WriteHeader(http.StatusNoContent)
-			log.Printf("[CORS] ===== REQUEST END (OPTIONS) =====")
 			return
 		}
 
@@ -139,8 +111,9 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 		wrapped := &responseLogger{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(wrapped, r)
 		
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			log.Printf("[CORS] ===== REQUEST END ==== %s %s -> Status: %d", r.Method, r.URL.Path, wrapped.statusCode)
+		// 只记录失败的请求（status 不是 200）
+		if strings.HasPrefix(r.URL.Path, "/api/") && wrapped.statusCode != http.StatusOK {
+			log.Printf("[ERROR] Request failed: %s %s -> Status: %d", r.Method, r.URL.Path, wrapped.statusCode)
 		}
 	})
 }

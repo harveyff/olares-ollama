@@ -333,12 +333,22 @@
                 } else if (status === 'downloading' || status === 'pulling' || status.includes('pulling')) {
                     this.updateStatus(`Downloading model ${model_name}...`, 'loading');
                     this.showProgress(progress, completed, total);
+                } else if (status === 'verifying') {
+                    // 验证阶段：保持100%进度，不降低
+                    this.updateStatus(`Verifying model...`, 'loading');
+                    // 如果已经有100%进度，保持100%；否则显示实际进度
+                    const verifyProgress = progress >= 100 ? 100 : Math.max(progress, 95);
+                    this.showProgress(verifyProgress, completed, total);
                 } else if (status === 'verifying sha256 digest') {
                     this.updateStatus(`Verifying model file integrity...`, 'loading');
-                    this.showProgress(95, 0, 0); // Show 95% progress
+                    // 如果已经有100%进度，保持100%；否则显示95%
+                    const verifyProgress = progress >= 100 ? 100 : 95;
+                    this.showProgress(verifyProgress, 0, 0);
                 } else if (status === 'writing manifest') {
                     this.updateStatus(`Writing model manifest file...`, 'loading');
-                    this.showProgress(98, 0, 0); // Show 98% progress
+                    // 如果已经有100%进度，保持100%；否则显示98%
+                    const verifyProgress = progress >= 100 ? 100 : 98;
+                    this.showProgress(verifyProgress, 0, 0);
                 } else if (status === 'error') {
                     this.updateStatus('Download error occurred', 'error');
                     this.elements.progressContainer.classList.add('hidden');

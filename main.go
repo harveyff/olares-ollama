@@ -99,6 +99,15 @@ func ensureModel(client *ollama.Client, modelName string, progressManager *downl
 		if err := client.PullModelWithProgress(modelName, progressManager); err != nil {
 			log.Printf("Download attempt %d failed: %v", attempt, err)
 
+			// 在重试前，先检查模型是否已经存在（可能之前的下载已完成，只是验证时还没注册）
+			log.Printf("Checking if model %s exists before retry...", modelName)
+			exists, checkErr := client.ModelExists(modelName)
+			if checkErr == nil && exists {
+				log.Printf("Model %s found after download attempt %d, marking as completed", modelName, attempt)
+				progressManager.UpdateProgress("completed", 0, 0, modelName)
+				return nil
+			}
+
 			if attempt == maxRetries {
 				progressManager.UpdateProgress("error", 0, 0, modelName)
 				return fmt.Errorf("failed to pull model after %d attempts: %w", maxRetries, err)
