@@ -324,6 +324,50 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 		log.Printf("Download stream completed with 'success' status (received %d times)", successCount)
 	}
 
+	// 重要：Ollama 的 /api/pull 流结束后，后台可能还在继续下载文件
+	// 需要等待一段时间让 Ollama 完成实际的文件下载
+	// 特别是大文件，可能需要更长时间
+	log.Printf("Stream ended, but Ollama may still be downloading files in background. Waiting for background download to complete...")
+	progressUpdater.UpdateProgress("downloading", lastPullResp.Completed, lastPullResp.Total, modelName)
+	
+	// 等待后台下载完成：根据文件大小估算等待时间
+	// 如果 Total 很大，需要等待更长时间
+	waitTime := 30 * time.Second // 默认等待30秒
+	if lastPullResp.Total > 0 {
+		// 估算：假设下载速度至少 10MB/s，等待时间 = 剩余大小 / 10MB/s + 缓冲
+		remainingMB := float64(lastPullResp.Total-lastPullResp.Completed) / (1024 * 1024)
+		estimatedSeconds := int(remainingMB/10) + 30 // 至少30秒缓冲
+		if estimatedSeconds > 300 {
+			estimatedSeconds = 300 // 最多等待5分钟
+		}
+		waitTime = time.Duration(estimatedSeconds) * time.Second
+		log.Printf("Estimated wait time for background download: %v (based on %d MB remaining)", waitTime, int(remainingMB))
+	}
+	
+	// 等待期间定期检查模型是否可用
+	checkInterval := 5 * time.Second
+	elapsed := time.Duration(0)
+	for elapsed < waitTime {
+		time.Sleep(checkInterval)
+		elapsed += checkInterval
+		
+		// 检查模型是否已经在列表中
+		exists, err := c.ModelExists(modelName)
+		if err == nil && exists {
+			log.Printf("Model %s appeared in list during background download wait (after %v)", modelName, elapsed)
+			progressUpdater.UpdateProgress("completed", lastPullResp.Completed, lastPullResp.Total, modelName)
+			return nil
+		}
+		
+		// 每30秒输出一次等待状态
+		if int(elapsed.Seconds())%30 == 0 {
+			log.Printf("Still waiting for background download to complete... (%v/%v elapsed)", elapsed, waitTime)
+			progressUpdater.UpdateProgress("downloading", lastPullResp.Completed, lastPullResp.Total, modelName)
+		}
+	}
+	
+	log.Printf("Background download wait completed (%v), proceeding to verification...", waitTime)
+
 	// 验证模型是否真的下载成功并可用
 	// Ollama 可能在部分文件失败时仍返回 success，需要验证
 	// Ollama 下载完成后需要一些时间来注册模型到列表中
