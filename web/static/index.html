@@ -167,15 +167,17 @@
         </div>
         
         <div id="details" class="details hidden">
-            <div class="detail-item">
+            <div class="detail-item" style="display: flex; justify-content: space-between; align-items: center;">
                 <span class="detail-label">Model Name:</span>
-                <span id="model-name" class="detail-value">-</span>
-                <button id="copy-model-btn" onclick="copyModelName()" style="background: none; border: none; cursor: pointer; margin-left: 8px; padding: 4px; vertical-align: middle;" title="Copy model name">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: #007bff;">
-                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                    </svg>
-                </button>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <span id="model-name" class="detail-value">-</span>
+                    <button id="copy-model-btn" onclick="copyModelName()" style="background: none; border: none; cursor: pointer; padding: 4px; vertical-align: middle;" title="Copy model name">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: #007bff;">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                    </button>
+                </div>
             </div>
             <div class="detail-item">
                 <span class="detail-label">Current Status:</span>
