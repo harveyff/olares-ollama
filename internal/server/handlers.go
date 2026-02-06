@@ -975,6 +975,343 @@ func (s *Server) convertOllamaStreamToOpenAI(w http.ResponseWriter, body io.Read
 	log.Printf("<<< Converted and sent OpenAI stream response (%d bytes) <<<", totalBytes)
 }
 
+// handleOpenAICompletions handles OpenAI compatible text completions endpoint
+func (s *Server) handleOpenAICompletions(w http.ResponseWriter, r *http.Request) {
+	log.Printf("=== OpenAI Completions endpoint: %s %s, Method=%s, RemoteAddr=%s ===", 
+		r.Method, r.URL.Path, r.Method, r.RemoteAddr)
+	
+	if r.Method == "OPTIONS" {
+		log.Printf("OpenAI Completions: Handling OPTIONS preflight")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	
+	if r.Method == "GET" {
+		log.Printf("OpenAI Completions received GET request (health check)")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "ok",
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		log.Printf("!!! OpenAI Completions received unsupported method: %s !!!", r.Method)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Method not allowed",
+		})
+		return
+	}
+	
+	log.Printf("*** Handling OpenAI Completions POST request from %s ***", r.RemoteAddr)
+	
+	// Read request body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("!!! Failed to read OpenAI completions request body: %v !!!", err)
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+	
+	if len(body) == 0 {
+		log.Printf("!!! OpenAI completions request body is empty !!!")
+		http.Error(w, "Request body cannot be empty", http.StatusBadRequest)
+		return
+	}
+	
+	// Parse OpenAI format request
+	var openaiRequest map[string]interface{}
+	if err := json.Unmarshal(body, &openaiRequest); err != nil {
+		log.Printf("!!! Failed to parse OpenAI completions JSON: %v, body: %s !!!", err, string(body))
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	
+	// Extract prompt
+	prompt, ok := openaiRequest["prompt"].(string)
+	if !ok {
+		// Try array format
+		if promptArray, ok := openaiRequest["prompt"].([]interface{}); ok && len(promptArray) > 0 {
+			if promptStr, ok := promptArray[0].(string); ok {
+				prompt = promptStr
+			}
+		}
+		if prompt == "" {
+			log.Printf("!!! Missing or invalid 'prompt' field in OpenAI completions request !!!")
+			http.Error(w, "Missing 'prompt' field", http.StatusBadRequest)
+			return
+		}
+	}
+	
+	// Check if streaming
+	stream := false
+	if streamVal, ok := openaiRequest["stream"]; ok {
+		if streamBool, ok := streamVal.(bool); ok {
+			stream = streamBool
+		}
+	}
+	
+	// Build Ollama request (use /api/generate for text completions)
+	ollamaRequest := map[string]interface{}{
+		"model":  s.config.Model,
+		"prompt": prompt,
+		"stream": stream,
+	}
+	
+	// Copy other parameters if present
+	if maxTokens, ok := openaiRequest["max_tokens"]; ok {
+		ollamaRequest["num_predict"] = maxTokens
+	}
+	if temperature, ok := openaiRequest["temperature"]; ok {
+		ollamaRequest["temperature"] = temperature
+	}
+	if topP, ok := openaiRequest["top_p"]; ok {
+		ollamaRequest["top_p"] = topP
+	}
+	if stop, ok := openaiRequest["stop"]; ok {
+		ollamaRequest["stop"] = stop
+	}
+	
+	modifiedBody, err := json.Marshal(ollamaRequest)
+	if err != nil {
+		log.Printf("!!! Failed to marshal Ollama completions request: %v !!!", err)
+		http.Error(w, "Failed to prepare request", http.StatusInternalServerError)
+		return
+	}
+	
+	log.Printf(">>> Converted OpenAI completions to Ollama format: body size=%d bytes, model=%s, stream=%v <<<",
+		len(modifiedBody), s.config.Model, stream)
+	
+	// Collect headers
+	headers := make(map[string]string)
+	for key, values := range r.Header {
+		if len(values) > 0 && !strings.HasPrefix(strings.ToLower(key), "host") {
+			headers[key] = values[0]
+		}
+	}
+	headers["Content-Type"] = "application/json"
+	
+	log.Printf(">>> Proxying OpenAI completions request to Ollama /api/generate (model: %s) <<<", s.config.Model)
+	
+	// Proxy to Ollama
+	resp, err := s.ollamaClient.ProxyRequest(
+		"POST",
+		"/api/generate",
+		bytes.NewReader(modifiedBody),
+		headers,
+	)
+	if err != nil {
+		log.Printf("!!! Failed to proxy OpenAI completions request to Ollama: %v !!!", err)
+		http.Error(w, "Failed to proxy request", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+	
+	log.Printf("<<< Ollama returned status %d for OpenAI completions request <<<", resp.StatusCode)
+	
+	// Set OpenAI-compatible response headers
+	if stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Transfer-Encoding", "chunked")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("Cache-Control", "no-cache")
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	
+	w.WriteHeader(resp.StatusCode)
+	
+	// Flush headers if possible (for streaming)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	
+	log.Printf(">>> Starting to convert Ollama response to OpenAI completions format (stream=%v) <<<", stream)
+	
+	// Convert Ollama response to OpenAI format
+	if stream {
+		// Handle streaming response
+		s.convertOllamaGenerateStreamToOpenAI(w, resp.Body, s.config.Model)
+	} else {
+		// Handle non-streaming response
+		s.convertOllamaGenerateToOpenAI(w, resp.Body, s.config.Model)
+	}
+}
+
+// convertOllamaGenerateToOpenAI converts Ollama /api/generate response to OpenAI completions format
+func (s *Server) convertOllamaGenerateToOpenAI(w http.ResponseWriter, body io.Reader, modelName string) {
+	bodyBytes, err := io.ReadAll(body)
+	if err != nil {
+		log.Printf("!!! Error reading Ollama generate response: %v !!!", err)
+		http.Error(w, "Failed to read response", http.StatusInternalServerError)
+		return
+	}
+	
+	var ollamaResp map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &ollamaResp); err != nil {
+		log.Printf("!!! Error parsing Ollama generate response: %v, body: %s !!!", err, string(bodyBytes))
+		http.Error(w, "Failed to parse response", http.StatusInternalServerError)
+		return
+	}
+	
+	// Extract response text
+	responseText, _ := ollamaResp["response"].(string)
+	
+	// Determine finish_reason
+	finishReason := "stop"
+	if done, ok := ollamaResp["done"].(bool); ok && !done {
+		finishReason = "length" // If not done, assume length limit
+	}
+	
+	// Create OpenAI format response
+	openAIResp := map[string]interface{}{
+		"id":      fmt.Sprintf("cmpl-%d", time.Now().Unix()),
+		"object":  "text_completion",
+		"created": time.Now().Unix(),
+		"model":   modelName,
+		"choices": []map[string]interface{}{
+			{
+				"text":          responseText,
+				"index":         0,
+				"logprobs":      nil,
+				"finish_reason": finishReason,
+			},
+		},
+		"usage": map[string]interface{}{
+			"prompt_tokens":     0,
+			"completion_tokens": 0,
+			"total_tokens":      0,
+		},
+	}
+	
+	// Try to extract token usage if available
+	if evalCount, ok := ollamaResp["eval_count"].(float64); ok {
+		openAIResp["usage"].(map[string]interface{})["completion_tokens"] = int(evalCount)
+		openAIResp["usage"].(map[string]interface{})["total_tokens"] = int(evalCount)
+	}
+	if promptEvalCount, ok := ollamaResp["prompt_eval_count"].(float64); ok {
+		openAIResp["usage"].(map[string]interface{})["prompt_tokens"] = int(promptEvalCount)
+		if total, ok := openAIResp["usage"].(map[string]interface{})["total_tokens"].(int); ok {
+			openAIResp["usage"].(map[string]interface{})["total_tokens"] = total + int(promptEvalCount)
+		}
+	}
+	
+	responseJSON, err := json.Marshal(openAIResp)
+	if err != nil {
+		log.Printf("!!! Error marshaling OpenAI completions response: %v !!!", err)
+		http.Error(w, "Failed to format response", http.StatusInternalServerError)
+		return
+	}
+	
+	w.Write(responseJSON)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	log.Printf("<<< Converted and sent OpenAI completions format response (%d bytes) <<<", len(responseJSON))
+}
+
+// convertOllamaGenerateStreamToOpenAI converts Ollama /api/generate streaming response to OpenAI SSE format
+func (s *Server) convertOllamaGenerateStreamToOpenAI(w http.ResponseWriter, body io.Reader, modelName string) {
+	flusher, hasFlusher := w.(http.Flusher)
+	scanner := bufio.NewScanner(body)
+	responseID := fmt.Sprintf("cmpl-%d", time.Now().Unix())
+	created := time.Now().Unix()
+	var totalBytes int64
+	var fullText strings.Builder
+	
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		
+		var ollamaResp map[string]interface{}
+		if err := json.Unmarshal(line, &ollamaResp); err != nil {
+			log.Printf("!!! Error parsing Ollama generate stream line: %v, line: %s !!!", err, string(line))
+			continue
+		}
+		
+		// Check if done
+		done, _ := ollamaResp["done"].(bool)
+		
+		// Extract response text
+		responseText, _ := ollamaResp["response"].(string)
+		if responseText != "" {
+			fullText.WriteString(responseText)
+		}
+		
+		if done {
+			// Send final chunk with finish_reason
+			finalChunk := map[string]interface{}{
+				"id":      responseID,
+				"object":  "text_completion",
+				"created": created,
+				"model":   modelName,
+				"choices": []map[string]interface{}{
+					{
+						"index":         0,
+						"text":          "",
+						"logprobs":      nil,
+						"finish_reason": "stop",
+					},
+				},
+			}
+			finalJSON, _ := json.Marshal(finalChunk)
+			w.Write([]byte(fmt.Sprintf("data: %s\n\n", finalJSON)))
+			w.Write([]byte("data: [DONE]\n\n"))
+			if hasFlusher {
+				flusher.Flush()
+			}
+			break
+		}
+		
+		// Send incremental chunk
+		if responseText != "" {
+			chunk := map[string]interface{}{
+				"id":      responseID,
+				"object":  "text_completion",
+				"created": created,
+				"model":   modelName,
+				"choices": []map[string]interface{}{
+					{
+						"index": 0,
+						"text":  responseText,
+						"logprobs": nil,
+					},
+				},
+			}
+			
+			chunkJSON, err := json.Marshal(chunk)
+			if err != nil {
+				log.Printf("!!! Error marshaling chunk: %v !!!", err)
+				continue
+			}
+			
+			chunkLine := fmt.Sprintf("data: %s\n\n", chunkJSON)
+			written, err := w.Write([]byte(chunkLine))
+			if err != nil {
+				log.Printf("!!! Error writing chunk: %v !!!", err)
+				break
+			}
+			totalBytes += int64(written)
+			
+			if hasFlusher {
+				flusher.Flush()
+			}
+		}
+	}
+	
+	if err := scanner.Err(); err != nil {
+		log.Printf("!!! Error scanning stream: %v !!!", err)
+	}
+	
+	log.Printf("<<< Converted and sent OpenAI completions stream response (%d bytes) <<<", totalBytes)
+}
+
 // handleSingleEmbedding handles a single embedding request and returns Ollama format
 func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, body []byte, requestData map[string]interface{}) {
 	var err error
