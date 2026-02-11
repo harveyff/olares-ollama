@@ -5,11 +5,7 @@ FROM golang:1.21-alpine AS builder
 WORKDIR /app
 
 # 复制go mod文件
-#COPY go.mod go.sum ./
-COPY go.* ./
-RUN go mod download
-
-# 下载依赖
+COPY go.mod ./
 RUN go mod download
 
 # 复制源代码
