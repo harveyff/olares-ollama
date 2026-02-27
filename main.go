@@ -74,6 +74,15 @@ func main() {
 }
 
 func ensureModel(client *ollama.Client, modelName string, progressManager *download.ProgressManager) error {
+	// Wait for Ollama to be reachable (e.g. when proxy and Ollama run in separate pods)
+	ctx := context.Background()
+	const ollamaWaitTimeout = 10 * time.Minute
+	const ollamaRetryInterval = 5 * time.Second
+	log.Printf("Waiting for Ollama server (up to %v)...", ollamaWaitTimeout)
+	if err := client.WaitForOllama(ctx, ollamaWaitTimeout, ollamaRetryInterval); err != nil {
+		return fmt.Errorf("Ollama not ready: %w", err)
+	}
+
 	log.Printf("Checking if model %s is available...", modelName)
 
 	// 检查模型是否已存在

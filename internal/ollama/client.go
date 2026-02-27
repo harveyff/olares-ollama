@@ -2,10 +2,12 @@ package ollama
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -36,6 +38,49 @@ func NewClientWithTimeout(baseURL string, downloadTimeoutMinutes int) *Client {
 		downloadClient: &http.Client{
 			Timeout: time.Duration(downloadTimeoutMinutes) * time.Minute,
 		},
+	}
+}
+
+// WaitForOllama blocks until the Ollama server is reachable or ctx is done.
+// It retries every interval so that when the proxy starts before Ollama is up
+// (e.g. in separate pods), we don't fail immediately.
+func (c *Client) WaitForOllama(ctx context.Context, maxWait time.Duration, interval time.Duration) error {
+	deadline := time.Now().Add(maxWait)
+	shortClient := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				d := net.Dialer{Timeout: 5 * time.Second}
+				return d.DialContext(ctx, network, addr)
+			},
+		},
+	}
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("Ollama server not reachable after %v", maxWait)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/tags", nil)
+		if err != nil {
+			return err
+		}
+		resp, err := shortClient.Do(req)
+		if err != nil {
+			log.Printf("Ollama not ready yet (%v), retrying in %v...", err, interval)
+			time.Sleep(interval)
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			log.Printf("Ollama server is ready")
+			return nil
+		}
+		log.Printf("Ollama returned %s, retrying in %v...", resp.Status, interval)
+		time.Sleep(interval)
 	}
 }
 
