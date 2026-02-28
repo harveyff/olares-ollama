@@ -93,6 +93,12 @@
             color: #666;
         }
         
+        .progress-speed-eta {
+            font-size: 0.85em;
+            color: #888;
+            margin-top: 6px;
+        }
+        
         .details {
             background: #f8f9fa;
             padding: 15px;
@@ -140,6 +146,21 @@
             animation: pulse 2s infinite;
         }
         
+        .status-hint {
+            font-size: 0.9em;
+            color: #666;
+            margin-top: 8px;
+        }
+        
+        .status-hint a {
+            color: #007bff;
+            text-decoration: none;
+        }
+        
+        .status-hint a:hover {
+            text-decoration: underline;
+        }
+        
         .hidden {
             display: none;
         }
@@ -152,11 +173,12 @@
             <p>AI Model Download Manager</p>
         </div>
         
-        <div id="status" class="status loading">
+        <div id="status" class="status loading" role="status" aria-live="polite">
             <div class="status-text">Connecting to server...</div>
+            <div id="status-hint" class="status-hint hidden"></div>
         </div>
         
-        <div id="progress-container" class="progress-container hidden">
+        <div id="progress-container" class="progress-container hidden" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Download progress">
             <div class="progress-bar">
                 <div id="progress-fill" class="progress-fill"></div>
             </div>
@@ -164,6 +186,7 @@
                 <span id="progress-percent">0%</span>
                 <span id="progress-size">0 / 0 MB</span>
             </div>
+            <div id="progress-speed-eta" class="progress-speed-eta hidden"></div>
         </div>
         
         <div id="details" class="details hidden">
@@ -217,6 +240,7 @@
             constructor() {
                 this.pollInterval = 2000; // 2秒轮询一次
                 this.isPolling = false;
+                this.completedPollCount = 0; // 完成后已轮询次数，达到 2 次后停止轮询
                 
                 this.elements = {
                     status: document.getElementById('status'),
@@ -225,13 +249,15 @@
                     progressFill: document.getElementById('progress-fill'),
                     progressPercent: document.getElementById('progress-percent'),
                     progressSize: document.getElementById('progress-size'),
+                    progressSpeedEta: document.getElementById('progress-speed-eta'),
                     details: document.getElementById('details'),
                     modelName: document.getElementById('model-name'),
                     currentStatus: document.getElementById('current-status'),
                     completedAt: document.getElementById('completed-at'),
                     duration: document.getElementById('duration'),
                     apiUrlContainer: document.getElementById('api-url-container'),
-                    apiUrlLink: document.getElementById('api-url-link')
+                    apiUrlLink: document.getElementById('api-url-link'),
+                    statusHint: document.getElementById('status-hint')
                 };
                 
                 this.startPolling();
@@ -247,30 +273,35 @@
                 try {
                     const response = await fetch('/api/progress');
                     if (!response.ok) {
-                        throw new Error(`HTTP ${response.status}`);
+                        this.updateStatus('Unable to get progress information', 'error');
+                        this.showStatusHint(`Server returned ${response.status}. <a href="" onclick="location.reload();return false;">Refresh</a>`);
+                        setTimeout(() => this.fetchProgress(), this.pollInterval * 2);
+                        return;
                     }
-                    
                     const data = await response.json();
                     this.updateProgress(data);
-                    
-                    // If download complete, reduce polling frequency
                     if (data.status === 'completed' || data.status === 'success' || data.status === 'complete') {
-                        setTimeout(() => this.fetchProgress(), this.pollInterval * 3); // Slow down polling
+                        this.completedPollCount++;
+                        if (this.completedPollCount >= 2) {
+                            return; // 已完成且已确认，停止轮询
+                        }
+                        setTimeout(() => this.fetchProgress(), this.pollInterval * 3);
                     } else {
+                        this.completedPollCount = 0;
                         setTimeout(() => this.fetchProgress(), this.pollInterval);
                     }
                 } catch (error) {
                     console.error('Failed to fetch progress:', error);
-                    this.updateStatus('Unable to get progress information', 'error');
-                    
-                    // Retry with delay on error
+                    // 网络失败（应用未启动或不可达）：显示“等待应用启动”并继续重试
+                    this.updateStatus('Waiting for app to start…', 'loading');
+                    this.showStatusHint('Retrying in a few seconds. If the app is running, check the URL and network.');
                     setTimeout(() => this.fetchProgress(), this.pollInterval * 2);
                 }
             }
             
             updateProgress(data) {
                 const { status, progress, total, completed, model_name, timestamp, completed_at, duration } = data;
-                
+                this.showStatusHint(''); // 默认清除提示，错误分支会再设置
                 // Update basic information
                 this.elements.modelName.textContent = model_name || '-';
                 
@@ -337,13 +368,13 @@
                 if (status === 'completed' || status === 'success' || status === 'complete') {
                     this.updateStatus(`Model ${model_name} download completed!`, 'success');
                     this.elements.progressContainer.classList.add('hidden');
-                    // Display API URL if available
+                    this.showStatusHint('');
                     if (data.app_url) {
                         this.showApiUrl(data.app_url);
                     }
                 } else if (status === 'downloading' || status === 'pulling' || status.includes('pulling')) {
                     this.updateStatus(`Downloading model ${model_name}...`, 'loading');
-                    this.showProgress(progress, completed, total);
+                    this.showProgress(progress, completed, total, data);
                 } else if (status === 'verifying') {
                     // 验证阶段：保持100%进度，不降低
                     this.updateStatus(`Verifying model...`, 'loading');
@@ -362,10 +393,11 @@
                     this.showProgress(verifyProgress, completed, total);
                 } else if (status === 'pulling manifest') {
                     this.updateStatus(`Pulling model manifest...`, 'loading');
-                    this.showProgress(progress, completed, total);
+                    this.showProgress(progress, completed, total, data);
                 } else if (status === 'error') {
                     this.updateStatus('Download error occurred', 'error');
                     this.elements.progressContainer.classList.add('hidden');
+                    this.showStatusHint('Refresh the page to retry. <a href="" onclick="location.reload();return false;">Refresh</a>');
                 } else if (status === 'starting') {
                     this.updateStatus(`Preparing to download model ${model_name}...`, 'loading');
                     this.showProgress(0, 0, 0);
@@ -374,17 +406,17 @@
                     this.updateStatus(`Status: ${statusDisplay}`, 'loading');
                     // 如果有进度信息，显示进度；否则显示当前进度或默认值
                     if (total > 0 && completed >= 0) {
-                        this.showProgress(progress, completed, total);
+                        this.showProgress(progress, completed, total, data);
                     } else if (progress > 0) {
-                        this.showProgress(progress, completed, total);
+                        this.showProgress(progress, completed, total, data);
                     } else {
                         // 对于验证/解压等阶段，显示一个合理的进度值
-                        this.showProgress(95, 0, 0);
+                        this.showProgress(95, 0, 0, data);
                     }
                 } else {
                     // 如果没有状态，显示默认信息
                     this.updateStatus(`Processing...`, 'loading');
-                    this.showProgress(progress || 0, completed || 0, total || 0);
+                    this.showProgress(progress || 0, completed || 0, total || 0, data);
                 }
             }
             
@@ -392,18 +424,52 @@
                 this.elements.statusText.textContent = text;
                 this.elements.status.className = `status ${type}`;
             }
+            showStatusHint(html) {
+                const el = this.elements.statusHint;
+                if (html) {
+                    el.innerHTML = html;
+                    el.classList.remove('hidden');
+                } else {
+                    el.classList.add('hidden');
+                    el.innerHTML = '';
+                }
+            }
             
-            showProgress(progress, completed, total) {
-                this.elements.progressContainer.classList.remove('hidden');
-                
+            formatSize(completed, total) {
+                const GiB = 1024 * 1024 * 1024;
+                if (total >= GiB) {
+                    const completedGiB = (completed / GiB).toFixed(2);
+                    const totalGiB = (total / GiB).toFixed(2);
+                    return `${completedGiB} / ${totalGiB} GiB`;
+                }
+                const completedMB = Math.round(completed / (1024 * 1024));
+                const totalMB = Math.round(total / (1024 * 1024));
+                return `${completedMB} / ${totalMB} MB`;
+            },
+            formatSpeedEta(data) {
+                if (!data || !data.speed_bps || data.speed_bps <= 0) return null;
+                const speedMB = (data.speed_bps / (1024 * 1024)).toFixed(2);
+                let parts = [`Speed: ${speedMB} MB/s`];
+                if (data.eta_seconds != null && data.eta_seconds > 0) {
+                    const min = Math.floor(data.eta_seconds / 60);
+                    const sec = data.eta_seconds % 60;
+                    parts.push(`Remaining: ${min > 0 ? min + ' min ' : ''}${sec} s`);
+                }
+                if (data.eta_at != null && data.eta_at > 0) {
+                    parts.push(`ETA: ${new Date(data.eta_at * 1000).toLocaleTimeString()}`);
+                }
+                return parts.join(' · ');
+            },
+            showProgress(progress, completed, total, data) {
+                const container = this.elements.progressContainer;
+                container.classList.remove('hidden');
                 const percent = Math.max(0, Math.min(100, Math.round(progress || 0)));
+                container.setAttribute('aria-valuenow', percent);
                 this.elements.progressFill.style.width = `${percent}%`;
                 this.elements.progressPercent.textContent = `${percent}%`;
                 
                 if (total > 0 && completed >= 0) {
-                    const completedMB = Math.round(completed / (1024 * 1024));
-                    const totalMB = Math.round(total / (1024 * 1024));
-                    this.elements.progressSize.textContent = `${completedMB} / ${totalMB} MB`;
+                    this.elements.progressSize.textContent = this.formatSize(completed, total);
                 } else if (progress >= 95) {
                     // Verification and writing phase
                     if (progress >= 98) {
@@ -415,6 +481,14 @@
                     this.elements.progressSize.textContent = `${percent}%`;
                 } else {
                     this.elements.progressSize.textContent = 'Preparing download...';
+                }
+                
+                const speedEtaText = this.formatSpeedEta(data);
+                if (speedEtaText) {
+                    this.elements.progressSpeedEta.textContent = speedEtaText;
+                    this.elements.progressSpeedEta.classList.remove('hidden');
+                } else {
+                    this.elements.progressSpeedEta.classList.add('hidden');
                 }
             }
             

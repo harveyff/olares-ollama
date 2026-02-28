@@ -10,19 +10,25 @@ import (
 	"time"
 )
 
+// 1 GiB = 1024^3 bytes，用于单位切换
+const bytesPerGiB = 1024 * 1024 * 1024
+
 // ProgressManager 下载进度管理器
 type ProgressManager struct {
-	mu          sync.RWMutex
-	status      string
-	progress    float64
-	total       int64
-	completed   int64
-	modelName   string
-	appURL      string
-	startTime   time.Time
-	completedAt *time.Time // 完成时间，只在成功时设置一次
-	duration    int64      // 用时（秒），从持久化状态恢复
-	stateFile   string     // 状态文件路径
+	mu             sync.RWMutex
+	status         string
+	progress       float64
+	total          int64
+	completed      int64
+	modelName      string
+	appURL         string
+	startTime      time.Time
+	completedAt    *time.Time // 完成时间，只在成功时设置一次
+	duration       int64     // 用时（秒），从持久化状态恢复
+	stateFile      string    // 状态文件路径
+	lastCompleted  int64     // 上一时刻已下载字节数，用于计算速度
+	lastUpdateTime time.Time // 上一时刻更新时间
+	speedBps       float64   // 当前下载速度（字节/秒）
 }
 
 // persistedState 持久化的状态
@@ -40,9 +46,12 @@ type ProgressUpdate struct {
 	Total       int64   `json:"total"`
 	Completed   int64   `json:"completed"`
 	ModelName   string  `json:"model_name"`
-	Timestamp   int64   `json:"timestamp"`   // 当前时间戳（用于实时更新）
+	Timestamp   int64   `json:"timestamp"`             // 当前时间戳（用于实时更新）
 	CompletedAt *int64  `json:"completed_at,omitempty"` // 完成时间戳（固定不变）
 	Duration    *int64  `json:"duration,omitempty"`     // 用时（秒）
+	SpeedBps    float64 `json:"speed_bps,omitempty"`   // 下载速度（字节/秒）
+	EtaSeconds  *int64  `json:"eta_seconds,omitempty"`  // 预计剩余时间（秒）
+	EtaAt       *int64  `json:"eta_at,omitempty"`       // 预计完成时间戳
 }
 
 // NewProgressManager 创建新的进度管理器
@@ -147,6 +156,26 @@ func (pm *ProgressManager) UpdateProgress(status string, completed, total int64,
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
+	now := time.Now()
+	if status == "starting" {
+		pm.lastCompleted = 0
+		pm.lastUpdateTime = now
+		pm.speedBps = 0
+	} else if !pm.lastUpdateTime.IsZero() && completed > pm.lastCompleted && total > 0 {
+		elapsed := now.Sub(pm.lastUpdateTime).Seconds()
+		if elapsed > 0 {
+			instant := float64(completed-pm.lastCompleted) / elapsed
+			const emaAlpha = 0.3 // 指数移动平均，减小 ETA 抖动
+			if pm.speedBps <= 0 {
+				pm.speedBps = instant
+			} else {
+				pm.speedBps = emaAlpha*instant + (1-emaAlpha)*pm.speedBps
+			}
+		}
+	}
+	pm.lastCompleted = completed
+	pm.lastUpdateTime = now
+
 	pm.status = status
 	pm.completed = completed
 	pm.total = total
@@ -176,20 +205,31 @@ func (pm *ProgressManager) GetProgress() ProgressUpdate {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
+	now := time.Now()
 	update := ProgressUpdate{
 		Status:    pm.status,
 		Progress:  pm.progress,
 		Total:     pm.total,
 		Completed: pm.completed,
 		ModelName: pm.modelName,
-		Timestamp: time.Now().Unix(),
+		Timestamp: now.Unix(),
+		SpeedBps:  pm.speedBps,
+	}
+
+	// 下载中且速度有效时，计算预计剩余时间和完成时间
+	if (pm.status == "downloading" || pm.status == "pulling") && pm.speedBps > 0 && pm.total > pm.completed {
+		remaining := pm.total - pm.completed
+		etaSec := int64(float64(remaining) / pm.speedBps)
+		update.EtaSeconds = &etaSec
+		etaAt := now.Add(time.Duration(etaSec) * time.Second).Unix()
+		update.EtaAt = &etaAt
 	}
 
 	// 如果已完成，设置完成时间和用时
 	if pm.completedAt != nil {
 		completedAtUnix := pm.completedAt.Unix()
 		update.CompletedAt = &completedAtUnix
-		
+
 		// 使用持久化的用时，如果没有则计算
 		var duration int64
 		if pm.duration > 0 {
@@ -218,6 +258,15 @@ func (pm *ProgressManager) HandleProgressAPI(w http.ResponseWriter, r *http.Requ
 		"model_name": progress.ModelName,
 		"timestamp":  progress.Timestamp,
 		"app_url":    pm.appURL,
+	}
+	if progress.SpeedBps > 0 {
+		response["speed_bps"] = progress.SpeedBps
+	}
+	if progress.EtaSeconds != nil {
+		response["eta_seconds"] = *progress.EtaSeconds
+	}
+	if progress.EtaAt != nil {
+		response["eta_at"] = *progress.EtaAt
 	}
 
 	// 添加完成时间和用时（如果存在）
