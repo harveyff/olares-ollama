@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -100,57 +101,79 @@ func ensureModel(client *ollama.Client, modelName string, progressManager *downl
 	log.Printf("Model %s not found, starting download...", modelName)
 	progressManager.UpdateProgress("downloading", 0, 0, modelName)
 
-	// 下载模型，带重试机制
+	// 断点续传：重试时是否从上次进度继续由 Ollama 服务端决定。
+	// 在 Ollama 上设置 OLLAMA_NOPRUNE=1 可保留部分下载，提高重试续传概率。
+	log.Printf("Tip: Set OLLAMA_NOPRUNE=1 on the Ollama server to improve resume on retry")
+
 	maxRetries := 3
-	for attempt := 1; attempt <= maxRetries; attempt++ {
+	attempt := 1
+	const maxTransientRetries = 10 // 连续瞬时错误上限，超过则消耗一次 attempt
+	transientCount := 0
+	for attempt <= maxRetries {
 		log.Printf("Download attempt %d/%d for model %s", attempt, maxRetries, modelName)
 
-		if err := client.PullModelWithProgress(modelName, progressManager); err != nil {
-			log.Printf("Download attempt %d failed: %v", attempt, err)
+		err := client.PullModelWithProgress(modelName, progressManager)
+		if err == nil {
+			break
+		}
 
-			// 在重试前，先检查模型是否已经存在（可能之前的下载已完成，只是验证时还没注册）
-			log.Printf("Checking if model %s exists before retry...", modelName)
-			exists, checkErr := client.ModelExists(modelName)
-			if checkErr == nil && exists {
-				log.Printf("Model %s found after download attempt %d, marking as completed", modelName, attempt)
-				progressManager.UpdateProgress("completed", 0, 0, modelName)
-				return nil
+		log.Printf("Download attempt %d failed: %v", attempt, err)
+		errStr := err.Error()
+
+		log.Printf("Checking if model %s exists before retry...", modelName)
+		exists, checkErr := client.ModelExists(modelName)
+		if checkErr == nil && exists {
+			log.Printf("Model %s found after download attempt %d, marking as completed", modelName, attempt)
+			progressManager.UpdateProgress("completed", 0, 0, modelName)
+			return nil
+		}
+
+		// 瞬时错误（连接被拒/重置/EOF）不消耗重试次数，延长等待后再试
+		isTransient := strings.Contains(errStr, "connection refused") ||
+			strings.Contains(errStr, "connection reset") ||
+			strings.Contains(errStr, "unexpected EOF") ||
+			strings.Contains(errStr, "EOF")
+		if isTransient && attempt < maxRetries {
+			transientCount++
+			if transientCount > maxTransientRetries {
+				log.Printf("Too many transient errors (%d), consuming one attempt", transientCount)
+				transientCount = 0
+				attempt++
+				time.Sleep(10 * time.Second)
+				continue
 			}
-
-			if attempt == maxRetries {
-				progressManager.UpdateProgress("error", 0, 0, modelName)
-				return fmt.Errorf("failed to pull model after %d attempts: %w", maxRetries, err)
+			wait := 15 * time.Second
+			if strings.Contains(errStr, "connection refused") {
+				wait = 30 * time.Second
 			}
-
-			// 等待一段时间再重试
-			log.Printf("Waiting 10 seconds before retry...")
-			time.Sleep(10 * time.Second)
+			log.Printf("Transient error (%d/%d), retrying without consuming attempt (wait %v)...", transientCount, maxTransientRetries, wait)
+			time.Sleep(wait)
 			continue
 		}
 
-		// PullModelWithProgress 已经验证了模型可用性
-		// 再次确认模型存在（双重验证）
-		log.Printf("Double-checking model %s availability...", modelName)
-		exists, err := client.ModelExists(modelName)
-		if err != nil {
-			log.Printf("Warning: Failed to verify model after download: %v", err)
-			// 不返回错误，因为 PullModelWithProgress 已经验证过了
-		} else if !exists {
-			log.Printf("Warning: Model %s not found after download, may need retry", modelName)
-			if attempt < maxRetries {
-				log.Printf("Retrying download...")
-				time.Sleep(5 * time.Second)
-				continue
-			}
+		transientCount = 0
+		if attempt == maxRetries {
 			progressManager.UpdateProgress("error", 0, 0, modelName)
-			return fmt.Errorf("model %s download completed but model is not available", modelName)
+			return fmt.Errorf("failed to pull model after %d attempts: %w", maxRetries, err)
 		}
 
-		// 下载成功并验证通过
-		log.Printf("Model %s downloaded and verified successfully", modelName)
-		progressManager.UpdateProgress("completed", 0, 0, modelName)
-		return nil
+		log.Printf("Waiting 10 seconds before retry...")
+		time.Sleep(10 * time.Second)
+		attempt++
 	}
 
+	// PullModelWithProgress 已经验证了模型可用性
+	// 再次确认模型存在（双重验证）
+	log.Printf("Double-checking model %s availability...", modelName)
+	exists, err = client.ModelExists(modelName)
+	if err != nil {
+		log.Printf("Warning: Failed to verify model after download: %v", err)
+	} else if !exists {
+		progressManager.UpdateProgress("error", 0, 0, modelName)
+		return fmt.Errorf("model %s download completed but model is not available", modelName)
+	}
+
+	log.Printf("Model %s downloaded and verified successfully", modelName)
+	progressManager.UpdateProgress("completed", 0, 0, modelName)
 	return nil
 }
