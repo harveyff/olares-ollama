@@ -445,7 +445,7 @@
                 const completedMB = Math.round(completed / (1024 * 1024));
                 const totalMB = Math.round(total / (1024 * 1024));
                 return `${completedMB} / ${totalMB} MB`;
-            },
+            }
             formatSpeedEta(data) {
                 if (!data || !data.speed_bps || data.speed_bps <= 0) return null;
                 const speedMB = (data.speed_bps / (1024 * 1024)).toFixed(2);
@@ -459,7 +459,7 @@
                     parts.push(`ETA: ${new Date(data.eta_at * 1000).toLocaleTimeString()}`);
                 }
                 return parts.join(' · ');
-            },
+            }
             showProgress(progress, completed, total, data) {
                 const container = this.elements.progressContainer;
                 container.classList.remove('hidden');
