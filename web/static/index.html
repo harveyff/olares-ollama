@@ -440,22 +440,26 @@
                 if (total >= GiB) {
                     const completedGiB = (completed / GiB).toFixed(2);
                     const totalGiB = (total / GiB).toFixed(2);
-                    return `${completedGiB} / ${totalGiB} GiB`;
+                    return `${completedGiB} GiB / ${totalGiB} GiB`;
                 }
                 const completedMB = Math.round(completed / (1024 * 1024));
                 const totalMB = Math.round(total / (1024 * 1024));
-                return `${completedMB} / ${totalMB} MB`;
+                return `${completedMB} MB / ${totalMB} MB`;
             }
             formatSpeedEta(data) {
                 if (!data || !data.speed_bps || data.speed_bps <= 0) return null;
                 const speedMB = (data.speed_bps / (1024 * 1024)).toFixed(2);
                 let parts = [`Speed: ${speedMB} MB/s`];
                 if (data.eta_seconds != null && data.eta_seconds > 0) {
-                    const min = Math.floor(data.eta_seconds / 60);
-                    const sec = data.eta_seconds % 60;
-                    parts.push(`Remaining: ${min > 0 ? min + ' min ' : ''}${sec} s`);
-                }
-                if (data.eta_at != null && data.eta_at > 0) {
+                    const hours = Math.floor(data.eta_seconds / 3600);
+                    const min = Math.floor((data.eta_seconds % 3600) / 60);
+                    const sec = Math.round(data.eta_seconds % 60);
+                    let etaStr = '';
+                    if (hours > 0) etaStr += `${hours} h `;
+                    if (min > 0) etaStr += `${min} min `;
+                    etaStr += `${sec} s`;
+                    parts.push(`ETA: ${etaStr.trim()}`);
+                } else if (data.eta_at != null && data.eta_at > 0) {
                     parts.push(`ETA: ${new Date(data.eta_at * 1000).toLocaleTimeString()}`);
                 }
                 return parts.join(' · ');

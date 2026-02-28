@@ -176,6 +176,22 @@ When running `docker-compose up`, model files will be stored in the project root
 
 ## Troubleshooting
 
+### 断点续传 / Resumable Download
+
+重试时进度从 0% 开始是 **Ollama 服务端** 的行为：Ollama 的 `/api/pull` 在连接断开后再次调用会重新发起下载，是否从已下载部分续传由 Ollama 决定。
+
+**建议**：在 **Ollama 所在环境** 设置 `OLLAMA_NOPRUNE=1`，让 Ollama 保留部分下载文件，重试时更可能从断点续传。
+
+- **Docker Compose**：已在 `docker-compose.yml` 的 `ollama` 服务中默认加入 `OLLAMA_NOPRUNE=1`。
+- **Kubernetes**：在 Ollama 的 Deployment/Pod 的 `env` 中加入 `OLLAMA_NOPRUNE: "1"`。
+- **本机**：`export OLLAMA_NOPRUNE=1` 后再启动 `ollama serve`。
+
+本代理在遇到「连接被拒」「connection reset」「unexpected EOF」等瞬时错误时会自动重试且**不消耗** 3 次下载机会，只有非瞬时错误或连续瞬时错误过多才会计为一次失败。
+
+**若重试后仍从 0% 开始**：这是 Ollama 的 API 行为。每次重试会发送新的 `POST /api/pull`，Ollama 可能不会续传而重新拉取该层。若 Ollama 部署了**多副本**，重试可能打到另一台没有部分数据的实例，导致必然从 0% 开始。建议：拉取阶段使用**单副本**，或为 Ollama 配置**会话亲和**（同一客户端 IP 固定到同一 Pod），并确保 `OLLAMA_NOPRUNE=1` 设在该实例上。
+
+**单副本仍从 0% 时**：先确认环境变量在 Ollama 容器内生效（例如 `kubectl exec <ollama-pod> -- env | grep OLLAMA_NOPRUNE`）。若中间有 Ingress/反向代理，检查其**流式/长连接超时**（如 Nginx 的 `proxy_read_timeout`），过短会主动断开连接导致 EOF，需调大（例如 7200 秒）。
+
 ### Model Download Timeout
 If you encounter "context deadline exceeded" errors:
 

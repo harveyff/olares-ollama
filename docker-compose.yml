@@ -10,6 +10,7 @@ services:
       - ./data:/root/.ollama
     environment:
       - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_NOPRUNE=1  # 保留部分下载，重试时更可能断点续传
     restart: unless-stopped
 
   olares-ollama:

@@ -1,6 +1,7 @@
 package ollama
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -27,16 +28,22 @@ func NewClient(baseURL string) *Client {
 
 // NewClientWithTimeout creates a new Ollama client with custom timeout
 func NewClientWithTimeout(baseURL string, downloadTimeoutMinutes int) *Client {
+	// 下载用 Transport：延长空闲连接时间，减少中间层误判断连
+	downloadTransport := &http.Transport{
+		IdleConnTimeout:       5 * time.Minute,
+		ResponseHeaderTimeout: 60 * time.Second,
+		ExpectContinueTimeout: 10 * time.Second,
+	}
 	return &Client{
 		baseURL: strings.TrimSuffix(baseURL, "/"),
 		// Regular request client, 30 minutes timeout for long inference requests
-		// This is needed for chat completions that may take a long time
 		httpClient: &http.Client{
 			Timeout: 30 * time.Minute,
 		},
-		// Download dedicated client, configurable timeout
+		// Download dedicated client: long timeout + custom transport
 		downloadClient: &http.Client{
-			Timeout: time.Duration(downloadTimeoutMinutes) * time.Minute,
+			Timeout:   time.Duration(downloadTimeoutMinutes) * time.Minute,
+			Transport: downloadTransport,
 		},
 	}
 }
@@ -315,24 +322,25 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 
 	progressUpdater.UpdateProgress("downloading", 0, 0, modelName)
 
-	// 读取流式响应
-	decoder := json.NewDecoder(resp.Body)
+	// 使用较大缓冲读取流，减轻网络抖动带来的 EOF
+	bodyReader := bufio.NewReaderSize(resp.Body, 256*1024)
+	decoder := json.NewDecoder(bodyReader)
 	var lastPullResp PullResponse
 	var gotSuccess bool
 	var successCount int
 	
-	// 使用带超时的读取，避免无限等待
-	// 但要注意：我们不能简单地设置超时，因为下载可能需要很长时间
-	// 所以继续读取直到 EOF，但记录 success 状态
-	
 	for {
 		var pullResp PullResponse
 		if err := decoder.Decode(&pullResp); err == io.EOF {
-			// 流结束
 			log.Printf("Download stream ended (EOF)")
 			break
 		} else if err != nil {
-			progressUpdater.UpdateProgress("error", 0, 0, modelName)
+			// EOF 或连接中断时保留上次进度不归零，重试时界面仍显示“上次 X%”
+			if lastPullResp.Total > 0 && strings.Contains(strings.ToLower(err.Error()), "eof") {
+				progressUpdater.UpdateProgress(lastPullResp.Status, lastPullResp.Completed, lastPullResp.Total, modelName)
+			} else {
+				progressUpdater.UpdateProgress("error", 0, 0, modelName)
+			}
 			return err
 		}
 

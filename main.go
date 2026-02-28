@@ -107,60 +107,80 @@ func ensureModel(client *ollama.Client, modelName string, progressManager *downl
 
 	maxRetries := 3
 	attempt := 1
-	const maxTransientRetries = 10 // 连续瞬时错误上限，超过则消耗一次 attempt
+	const maxTransientRetries = 20 // 连续瞬时错误上限
 	transientCount := 0
 	for attempt <= maxRetries {
-		log.Printf("Download attempt %d/%d for model %s", attempt, maxRetries, modelName)
+			log.Printf("Download attempt %d/%d for model %s", attempt, maxRetries, modelName)
 
-		err := client.PullModelWithProgress(modelName, progressManager)
-		if err == nil {
-			break
-		}
+			err := client.PullModelWithProgress(modelName, progressManager)
+			if err == nil {
+				break
+			}
 
-		log.Printf("Download attempt %d failed: %v", attempt, err)
-		errStr := err.Error()
+			log.Printf("Download attempt %d failed: %v", attempt, err)
+			errStr := err.Error()
 
-		log.Printf("Checking if model %s exists before retry...", modelName)
-		exists, checkErr := client.ModelExists(modelName)
-		if checkErr == nil && exists {
-			log.Printf("Model %s found after download attempt %d, marking as completed", modelName, attempt)
-			progressManager.UpdateProgress("completed", 0, 0, modelName)
-			return nil
-		}
+			log.Printf("Checking if model %s exists before retry...", modelName)
+			exists, checkErr := client.ModelExists(modelName)
+			if checkErr == nil && exists {
+				log.Printf("Model %s found after download attempt %d, marking as completed", modelName, attempt)
+				progressManager.UpdateProgress("completed", 0, 0, modelName)
+				return nil
+			}
 
-		// 瞬时错误（连接被拒/重置/EOF）不消耗重试次数，延长等待后再试
-		isTransient := strings.Contains(errStr, "connection refused") ||
-			strings.Contains(errStr, "connection reset") ||
-			strings.Contains(errStr, "unexpected EOF") ||
-			strings.Contains(errStr, "EOF")
-		if isTransient && attempt < maxRetries {
-			transientCount++
-			if transientCount > maxTransientRetries {
-				log.Printf("Too many transient errors (%d), consuming one attempt", transientCount)
-				transientCount = 0
-				attempt++
-				time.Sleep(10 * time.Second)
+			// 瞬时错误不消耗 attempt，指数退避后重试
+			isTransient := strings.Contains(errStr, "connection refused") ||
+				strings.Contains(errStr, "connection reset") ||
+				strings.Contains(errStr, "unexpected EOF") ||
+				strings.Contains(errStr, "EOF")
+			if isTransient && attempt < maxRetries {
+				transientCount++
+				if transientCount > maxTransientRetries {
+					log.Printf("Too many transient errors (%d), consuming one attempt", transientCount)
+					transientCount = 0
+					attempt++
+					time.Sleep(10 * time.Second)
+					continue
+				}
+				// 指数退避：15s -> 30s -> 60s -> 120s（上限 120s）
+				wait := 15 * time.Second
+				if strings.Contains(errStr, "connection refused") {
+					wait = 30 * time.Second
+				}
+				if transientCount > 1 {
+					backoff := 15 * time.Duration(1<<uint(transientCount-1)) * time.Second
+					if backoff > 120*time.Second {
+						backoff = 120 * time.Second
+					}
+					if strings.Contains(errStr, "connection refused") {
+						backoff = 30 * time.Duration(1<<uint(transientCount-1)) * time.Second
+						if backoff > 120*time.Second {
+							backoff = 120 * time.Second
+						}
+					}
+					wait = backoff
+				}
+				p := progressManager.GetProgress()
+				if p.Total > 0 && p.Progress > 0 {
+					log.Printf("Retrying... last progress was %.1f%% (transient error %d/%d, wait %v)", p.Progress, transientCount, maxTransientRetries, wait)
+				} else {
+					log.Printf("Transient error (%d/%d), retrying without consuming attempt (wait %v)...", transientCount, maxTransientRetries, wait)
+				}
+				log.Printf("Note: Retry sends a new /api/pull; Ollama may show progress from 0%% again")
+				time.Sleep(wait)
 				continue
 			}
-			wait := 15 * time.Second
-			if strings.Contains(errStr, "connection refused") {
-				wait = 30 * time.Second
+
+			transientCount = 0
+			if attempt == maxRetries {
+				progressManager.UpdateProgress("error", 0, 0, modelName)
+				return fmt.Errorf("failed to pull model after %d attempts: %w", maxRetries, err)
 			}
-			log.Printf("Transient error (%d/%d), retrying without consuming attempt (wait %v)...", transientCount, maxTransientRetries, wait)
-			time.Sleep(wait)
-			continue
-		}
 
-		transientCount = 0
-		if attempt == maxRetries {
-			progressManager.UpdateProgress("error", 0, 0, modelName)
-			return fmt.Errorf("failed to pull model after %d attempts: %w", maxRetries, err)
+			log.Printf("Waiting 10 seconds before retry...")
+			time.Sleep(10 * time.Second)
+			attempt++
 		}
-
-		log.Printf("Waiting 10 seconds before retry...")
-		time.Sleep(10 * time.Second)
-		attempt++
-	}
 
 	// PullModelWithProgress 已经验证了模型可用性
 	// 再次确认模型存在（双重验证）
