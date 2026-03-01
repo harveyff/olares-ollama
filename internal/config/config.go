@@ -7,21 +7,23 @@ import (
 
 // Config application configuration
 type Config struct {
-	Model           string // Target model name
-	OllamaURL       string // Ollama server address
-	Port            int    // Proxy server port
-	DownloadTimeout int    // Download timeout in minutes
-	AppURL          string // Application URL for API access
+	Model              string // Target model name
+	OllamaURL          string // Ollama server address
+	Port               int    // Proxy server port
+	DownloadTimeout    int    // Download timeout in minutes
+	AppURL             string // Application URL for API access
+	OllamaPullDelaySec int    // Seconds to wait after Ollama is ready before first pull (for blob index to load, helps resume after restart)
 }
 
 // Load loads configuration from environment variables
 func Load() *Config {
 	cfg := &Config{
-		Model:           getEnv("OLLAMA_MODEL", "llama2"),
-		OllamaURL:       getEnv("OLLAMA_URL", "http://localhost:11434"),
-		Port:            getEnvInt("PORT", 8080),
-		DownloadTimeout: getEnvInt("DOWNLOAD_TIMEOUT", 60), // Default 60 minutes
-		AppURL:          getEnv("APP_URL", ""),
+		Model:              getEnv("OLLAMA_MODEL", "llama2"),
+		OllamaURL:          getEnv("OLLAMA_URL", "http://localhost:11434"),
+		Port:               getEnvInt("PORT", 8080),
+		DownloadTimeout:    getEnvInt("DOWNLOAD_TIMEOUT", 60), // Default 60 minutes
+		AppURL:             getEnv("APP_URL", ""),
+		OllamaPullDelaySec: getEnvInt("OLLAMA_PULL_DELAY_SECONDS", 30), // 30s after ready so Ollama can load blob index (resume after restart)
 	}
 
 	return cfg

@@ -59,6 +59,7 @@ http://localhost:8080
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama server address |
 | `PORT` | `8080` | Proxy server port |
 | `DOWNLOAD_TIMEOUT` | `60` | Model download timeout in minutes |
+| `OLLAMA_PULL_DELAY_SECONDS` | `30` | Seconds to wait after Ollama is ready before first pull; gives Ollama time to load blob index so API pull can resume from disk after restart (set `0` to disable) |
 | `APP_URL` | (empty) | API access URL displayed after download completes (optional) |
 
 ## API Interfaces
@@ -191,6 +192,11 @@ When running `docker-compose up`, model files will be stored in the project root
 **若重试后仍从 0% 开始**：这是 Ollama 的 API 行为。每次重试会发送新的 `POST /api/pull`，Ollama 可能不会续传而重新拉取该层。若 Ollama 部署了**多副本**，重试可能打到另一台没有部分数据的实例，导致必然从 0% 开始。建议：拉取阶段使用**单副本**，或为 Ollama 配置**会话亲和**（同一客户端 IP 固定到同一 Pod），并确保 `OLLAMA_NOPRUNE=1` 设在该实例上。
 
 **单副本仍从 0% 时**：先确认环境变量在 Ollama 容器内生效（例如 `kubectl exec <ollama-pod> -- env | grep OLLAMA_NOPRUNE`）。若中间有 Ingress/反向代理，检查其**流式/长连接超时**（如 Nginx 的 `proxy_read_timeout`），过短会主动断开连接导致 EOF，需调大（例如 7200 秒）。
+
+**重启 Pod 后仍从 0%**：若存储已持久化且已设 `OLLAMA_NOPRUNE=1`，磁盘上可能有部分数据但 **Ollama 对 API 拉取在进程重启后不续传**。本服务默认在 Ollama 就绪后再等待 **30 秒**（`OLLAMA_PULL_DELAY_SECONDS=30`）再发起首次 pull，以便 Ollama 完成 blobs/manifests 扫描，提高从磁盘续传的概率；若仍不续传，可进 Ollama 容器用 CLI 续传：
+```bash
+kubectl exec -it <ollama-pod> -- ollama pull <模型名>
+```
 
 ### Model Download Timeout
 If you encounter "context deadline exceeded" errors:

@@ -51,7 +51,7 @@ func main() {
 
 	// Check and download model in background
 	go func() {
-		if err := ensureModel(ollamaClient, cfg.Model, srv.GetProgressManager()); err != nil {
+		if err := ensureModel(ollamaClient, cfg.Model, cfg.OllamaPullDelaySec, srv.GetProgressManager()); err != nil {
 			log.Printf("Failed to ensure model: %v", err)
 			srv.GetProgressManager().UpdateProgress("error", 0, 0, cfg.Model)
 		}
@@ -74,7 +74,7 @@ func main() {
 	log.Println("Server exited")
 }
 
-func ensureModel(client *ollama.Client, modelName string, progressManager *download.ProgressManager) error {
+func ensureModel(client *ollama.Client, modelName string, ollamaPullDelaySec int, progressManager *download.ProgressManager) error {
 	// Wait for Ollama to be reachable (e.g. when proxy and Ollama run in separate pods)
 	ctx := context.Background()
 	const ollamaWaitTimeout = 10 * time.Minute
@@ -82,6 +82,12 @@ func ensureModel(client *ollama.Client, modelName string, progressManager *downl
 	log.Printf("Waiting for Ollama server (up to %v)...", ollamaWaitTimeout)
 	if err := client.WaitForOllama(ctx, ollamaWaitTimeout, ollamaRetryInterval); err != nil {
 		return fmt.Errorf("Ollama not ready: %w", err)
+	}
+
+	// 延迟再发起首次 pull，给 Ollama 时间扫描 blobs/manifests，便于重启后 API 能从磁盘续传（与 CLI 行为一致）
+	if ollamaPullDelaySec > 0 {
+		log.Printf("Waiting %d seconds for Ollama to load blob index (improves resume after restart)...", ollamaPullDelaySec)
+		time.Sleep(time.Duration(ollamaPullDelaySec) * time.Second)
 	}
 
 	log.Printf("Checking if model %s is available...", modelName)
