@@ -11,6 +11,7 @@ services:
     environment:
       - OLLAMA_HOST=0.0.0.0
       - OLLAMA_NOPRUNE=1  # 保留部分下载，重试时更可能断点续传
+      - OLLAMA_MAX_LOADED_MODELS=1  # 仅保留 1 个模型在内存，其他小模型不常驻，节省内存
     restart: unless-stopped
 
   olares-ollama:

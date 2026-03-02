@@ -12,6 +12,26 @@ import (
 	"time"
 )
 
+// toBool converts common JSON types to bool for options like "think"/"reasoning".
+func toBool(v interface{}) bool {
+	if v == nil {
+		return false
+	}
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	if s, ok := v.(string); ok {
+		return strings.EqualFold(s, "true") || s == "1"
+	}
+	if f, ok := v.(float64); ok {
+		return f != 0
+	}
+	if i, ok := v.(int); ok {
+		return i != 0
+	}
+	return false
+}
+
 // handleTags handles model list requests, forwards from ollama and filters by configured models
 func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
 	log.Printf("=== Tags endpoint: Method=%s, RemoteAddr=%s ===", r.Method, r.RemoteAddr)
@@ -311,6 +331,20 @@ func (s *Server) handleInferenceRequest(w http.ResponseWriter, r *http.Request, 
 
 	// Replace model parameter
 	requestData["model"] = s.config.Model
+
+	// Pass through Ollama "think" (Qwen3.5/DeepSeek thinking mode). If client sent top-level "think", keep it.
+	// Else if client sent options.think or options.reasoning, copy to top-level "think" for Ollama (boolean).
+	if path == "/api/chat" || path == "/api/generate" {
+		if _, hasThink := requestData["think"]; !hasThink {
+			if options, ok := requestData["options"].(map[string]interface{}); ok {
+				if thinkVal, ok := options["think"]; ok {
+					requestData["think"] = toBool(thinkVal)
+				} else if reasoning, ok := options["reasoning"]; ok {
+					requestData["think"] = toBool(reasoning)
+				}
+			}
+		}
+	}
 
 	// Re-serialize
 	modifiedBody, err := json.Marshal(requestData)
@@ -719,6 +753,16 @@ func (s *Server) handleOpenAIInferenceRequest(w http.ResponseWriter, r *http.Req
 		"model":    s.config.Model,
 		"messages": ollamaMessages,
 		"stream":   stream,
+	}
+	// Pass through "think" for Qwen3.5/DeepSeek: from top-level "think", or extra_body.think, or extra_body.reasoning
+	if thinkVal, ok := openaiRequest["think"]; ok {
+		ollamaRequest["think"] = toBool(thinkVal)
+	} else if extra, ok := openaiRequest["extra_body"].(map[string]interface{}); ok {
+		if v, ok := extra["think"]; ok {
+			ollamaRequest["think"] = toBool(v)
+		} else if v, ok := extra["reasoning"]; ok {
+			ollamaRequest["think"] = toBool(v)
+		}
 	}
 	
 	modifiedBody, err := json.Marshal(ollamaRequest)
