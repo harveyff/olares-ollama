@@ -183,16 +183,7 @@ func ensureModel(client *ollama.Client, modelName string, ollamaPullDelaySec int
 	}
 
 	if exists {
-		log.Printf("Model %s is already available, checking for updates...", modelName)
-		progressManager.UpdateProgress("checking", 0, 0, modelName)
-
-		// 即使模型已存在，也做一次 pull：Ollama 会对比每一层的 digest，
-		// 已有的层直接跳过（already exists），只下载变化的层（增量更新）。
-		// 如果没有更新，pull 很快就会返回 success。
-		if err := client.PullModelWithProgress(modelName, progressManager); err != nil {
-			// 增量更新失败不影响已有模型的使用，只记日志
-			log.Printf("Incremental update check failed (existing model still usable): %v", err)
-		}
+		log.Printf("Model %s is already available", modelName)
 		progressManager.UpdateProgress("completed", 0, 0, modelName)
 		return nil
 	}
