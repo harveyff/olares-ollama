@@ -281,13 +281,9 @@
                     const data = await response.json();
                     this.updateProgress(data);
                     if (data.status === 'completed' || data.status === 'success' || data.status === 'complete') {
-                        this.completedPollCount++;
-                        if (this.completedPollCount >= 2) {
-                            return; // 已完成且已确认，停止轮询
-                        }
-                        setTimeout(() => this.fetchProgress(), this.pollInterval * 3);
+                        // Keep polling at a slower rate to detect if Ollama goes down
+                        setTimeout(() => this.fetchProgress(), 15000);
                     } else {
-                        this.completedPollCount = 0;
                         setTimeout(() => this.fetchProgress(), this.pollInterval);
                     }
                 } catch (error) {
@@ -319,6 +315,10 @@
                     statusDisplay = 'Preparing';
                 } else if (status === 'error') {
                     statusDisplay = 'Needs attention';
+                } else if (status === 'checking') {
+                    statusDisplay = 'Checking for updates';
+                } else if (status === 'unavailable') {
+                    statusDisplay = 'Unavailable';
                 } else if (status === 'waiting') {
                     statusDisplay = 'Waiting for Ollama';
                 } else if (status === 'starting') {
@@ -399,6 +399,14 @@
                     this.updateStatus('Something went wrong', 'error');
                     this.elements.progressContainer.classList.add('hidden');
                     this.showStatusHint('Don\'t worry — we\'ll automatically retry in a moment. You can also try now: <button onclick="triggerRetry()" style="background:#4f46e5;color:#fff;border:none;padding:6px 20px;border-radius:6px;cursor:pointer;font-size:14px;margin-left:4px;">Retry Now</button>');
+                } else if (status === 'checking') {
+                    this.updateStatus(`Model found — checking for updates...`, 'loading');
+                    this.elements.progressContainer.classList.add('hidden');
+                    this.showStatusHint('If there are updates, only the changed parts will be downloaded.');
+                } else if (status === 'unavailable') {
+                    this.updateStatus('Model server is currently unavailable', 'error');
+                    this.elements.progressContainer.classList.add('hidden');
+                    this.showStatusHint('The Ollama server appears to be down. We\'re trying to reconnect automatically. <button onclick="triggerRetry()" style="background:#4f46e5;color:#fff;border:none;padding:6px 20px;border-radius:6px;cursor:pointer;font-size:14px;margin-left:4px;">Retry Now</button>');
                 } else if (status === 'waiting') {
                     this.updateStatus(`Waiting for Ollama to start up...`, 'loading');
                     this.elements.progressContainer.classList.add('hidden');

@@ -78,6 +78,8 @@ func main() {
 // ensureModelLoop wraps ensureModel with infinite retry: on failure it waits
 // with exponential backoff (up to 5 min) and retries. A signal on retryCh
 // (from /api/retry) wakes it up immediately.
+// After success, it monitors Ollama health; if Ollama goes down, it re-enters
+// the retry loop so the frontend always reflects the real state.
 func ensureModelLoop(client *ollama.Client, modelName string, ollamaPullDelaySec int, progressManager *download.ProgressManager, retryCh <-chan struct{}) {
 	backoff := 30 * time.Second
 	const maxBackoff = 5 * time.Minute
@@ -85,7 +87,13 @@ func ensureModelLoop(client *ollama.Client, modelName string, ollamaPullDelaySec
 	for {
 		err := ensureModel(client, modelName, ollamaPullDelaySec, progressManager)
 		if err == nil {
-			return
+			// Model is ready — start monitoring Ollama health.
+			// If Ollama goes down, this function returns and we re-enter the loop.
+			monitorOllamaHealth(client, modelName, progressManager, retryCh)
+			// Ollama went down — reset backoff and retry from the beginning
+			log.Printf("Ollama became unreachable, re-entering ensure model loop...")
+			backoff = 30 * time.Second
+			continue
 		}
 
 		log.Printf("Failed to ensure model: %v", err)
@@ -101,6 +109,50 @@ func ensureModelLoop(client *ollama.Client, modelName string, ollamaPullDelaySec
 		backoff *= 2
 		if backoff > maxBackoff {
 			backoff = maxBackoff
+		}
+	}
+}
+
+// monitorOllamaHealth periodically checks if Ollama is still reachable and the
+// model is still available. Returns when Ollama becomes unreachable so the
+// caller can re-enter the ensure loop.
+func monitorOllamaHealth(client *ollama.Client, modelName string, progressManager *download.ProgressManager, retryCh <-chan struct{}) {
+	const checkInterval = 15 * time.Second
+	const maxConsecutiveFailures = 3
+	failures := 0
+
+	log.Printf("Starting Ollama health monitor (every %v)", checkInterval)
+
+	for {
+		select {
+		case <-time.After(checkInterval):
+		case <-retryCh:
+			log.Printf("Manual retry triggered during health monitoring")
+		}
+
+		exists, err := client.ModelExists(modelName)
+		if err != nil {
+			failures++
+			log.Printf("Ollama health check failed (%d/%d): %v", failures, maxConsecutiveFailures, err)
+			if failures >= maxConsecutiveFailures {
+				log.Printf("Ollama appears to be down (failed %d consecutive checks)", failures)
+				progressManager.UpdateProgress("unavailable", 0, 0, modelName)
+				return
+			}
+			continue
+		}
+
+		if !exists {
+			log.Printf("Model %s no longer found in Ollama", modelName)
+			progressManager.UpdateProgress("unavailable", 0, 0, modelName)
+			return
+		}
+
+		// Healthy — reset failure counter
+		if failures > 0 {
+			log.Printf("Ollama health check recovered after %d failures", failures)
+			failures = 0
+			progressManager.UpdateProgress("completed", 0, 0, modelName)
 		}
 	}
 }
@@ -131,7 +183,16 @@ func ensureModel(client *ollama.Client, modelName string, ollamaPullDelaySec int
 	}
 
 	if exists {
-		log.Printf("Model %s is already available", modelName)
+		log.Printf("Model %s is already available, checking for updates...", modelName)
+		progressManager.UpdateProgress("checking", 0, 0, modelName)
+
+		// 即使模型已存在，也做一次 pull：Ollama 会对比每一层的 digest，
+		// 已有的层直接跳过（already exists），只下载变化的层（增量更新）。
+		// 如果没有更新，pull 很快就会返回 success。
+		if err := client.PullModelWithProgress(modelName, progressManager); err != nil {
+			// 增量更新失败不影响已有模型的使用，只记日志
+			log.Printf("Incremental update check failed (existing model still usable): %v", err)
+		}
 		progressManager.UpdateProgress("completed", 0, 0, modelName)
 		return nil
 	}
@@ -139,8 +200,6 @@ func ensureModel(client *ollama.Client, modelName string, ollamaPullDelaySec int
 	log.Printf("Model %s not found, starting download...", modelName)
 	progressManager.UpdateProgress("downloading", 0, 0, modelName)
 
-	// 断点续传：重试时是否从上次进度继续由 Ollama 服务端决定。
-	// 在 Ollama 上设置 OLLAMA_NOPRUNE=1 可保留部分下载，提高重试续传概率。
 	log.Printf("Tip: Set OLLAMA_NOPRUNE=1 on the Ollama server to improve resume on retry")
 
 	maxRetries := 3
