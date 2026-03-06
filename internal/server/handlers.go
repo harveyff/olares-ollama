@@ -721,7 +721,9 @@ func (s *Server) handleOpenAIInferenceRequest(w http.ResponseWriter, r *http.Req
 	log.Printf(">>> Parsed OpenAI request: model=%v, stream=%v, messages count=%d <<<",
 		openaiRequest["model"], openaiRequest["stream"], len(messages))
 	
-	// Convert messages
+	// Convert messages: handle OpenAI multimodal content format
+	// OpenAI content can be a plain string OR an array like [{"type":"text","text":"..."}]
+	// Ollama only accepts plain string content, so we need to flatten arrays.
 	ollamaMessages := []map[string]interface{}{}
 	for i, msg := range messages {
 		msgMap, ok := msg.(map[string]interface{})
@@ -729,9 +731,10 @@ func (s *Server) handleOpenAIInferenceRequest(w http.ResponseWriter, r *http.Req
 			log.Printf("!!! Skipping invalid message at index %d !!!", i)
 			continue
 		}
+		content := flattenContent(msgMap["content"])
 		ollamaMessages = append(ollamaMessages, map[string]interface{}{
 			"role":    msgMap["role"],
-			"content": msgMap["content"],
+			"content": content,
 		})
 	}
 	
@@ -2129,4 +2132,36 @@ func (s *Server) handleOllamaEmbedding(w http.ResponseWriter, r *http.Request, b
 		return
 	}
 	log.Printf("<<< Sent OpenAI embeddings format response (%d bytes) <<<", bytesCopied)
+}
+
+// flattenContent converts OpenAI multimodal content to a plain string for Ollama.
+// OpenAI allows content to be either a string or an array like:
+//
+//	[{"type":"text","text":"hello"}, {"type":"text","text":" world"}]
+//
+// Ollama only accepts a plain string, so we concatenate all text parts.
+func flattenContent(content interface{}) string {
+	if content == nil {
+		return ""
+	}
+	if s, ok := content.(string); ok {
+		return s
+	}
+	arr, ok := content.([]interface{})
+	if !ok {
+		return fmt.Sprintf("%v", content)
+	}
+	var parts []string
+	for _, item := range arr {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if t, _ := m["type"].(string); t == "text" {
+			if text, ok := m["text"].(string); ok {
+				parts = append(parts, text)
+			}
+		}
+	}
+	return strings.Join(parts, "")
 }
