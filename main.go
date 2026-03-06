@@ -183,7 +183,12 @@ func ensureModel(client *ollama.Client, modelName string, ollamaPullDelaySec int
 	}
 
 	if exists {
-		log.Printf("Model %s is already available", modelName)
+		log.Printf("Model %s is already available, checking for updates...", modelName)
+		progressManager.UpdateProgress("checking", 0, 0, modelName)
+
+		if err := client.PullModelWithProgress(modelName, progressManager); err != nil {
+			log.Printf("Incremental update check failed (existing model still usable): %v", err)
+		}
 		progressManager.UpdateProgress("completed", 0, 0, modelName)
 		return nil
 	}
