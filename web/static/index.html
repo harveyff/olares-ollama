@@ -273,8 +273,8 @@
                 try {
                     const response = await fetch('/api/progress');
                     if (!response.ok) {
-                        this.updateStatus('Unable to get progress information', 'error');
-                        this.showStatusHint(`Server returned ${response.status}. <a href="" onclick="location.reload();return false;">Refresh</a>`);
+                        this.updateStatus('Cannot connect to the service', 'error');
+                        this.showStatusHint(`The server responded with an unexpected status (${response.status}). <a href="" onclick="location.reload();return false;">Try again</a>`);
                         setTimeout(() => this.fetchProgress(), this.pollInterval * 2);
                         return;
                     }
@@ -293,8 +293,8 @@
                 } catch (error) {
                     console.error('Failed to fetch progress:', error);
                     // 网络失败（应用未启动或不可达）：显示“等待应用启动”并继续重试
-                    this.updateStatus('Waiting for app to start…', 'loading');
-                    this.showStatusHint('Retrying in a few seconds. If the app is running, check the URL and network.');
+                    this.updateStatus('Connecting to the service...', 'loading');
+                    this.showStatusHint('The service may still be starting up. We\'ll keep trying automatically.');
                     setTimeout(() => this.fetchProgress(), this.pollInterval * 2);
                 }
             }
@@ -308,19 +308,21 @@
                 // 格式化状态显示：将 completed 显示为 Completed
                 let statusDisplay = status || '-';
                 if (status === 'completed') {
-                    statusDisplay = 'Completed';
+                    statusDisplay = 'Ready';
                 } else if (status === 'downloading' || status === 'pulling') {
                     statusDisplay = 'Downloading';
                 } else if (status === 'verifying' || status === 'verifying sha256 digest') {
                     statusDisplay = 'Verifying';
                 } else if (status === 'writing manifest') {
-                    statusDisplay = 'Writing Manifest';
+                    statusDisplay = 'Finishing up';
                 } else if (status === 'pulling manifest') {
-                    statusDisplay = 'Pulling Manifest';
+                    statusDisplay = 'Preparing';
                 } else if (status === 'error') {
-                    statusDisplay = 'Error';
+                    statusDisplay = 'Needs attention';
+                } else if (status === 'waiting') {
+                    statusDisplay = 'Waiting for Ollama';
                 } else if (status === 'starting') {
-                    statusDisplay = 'Starting';
+                    statusDisplay = 'Getting ready';
                 } else if (status && status.includes('pulling')) {
                     statusDisplay = 'Downloading';
                 } else if (status) {
@@ -366,44 +368,46 @@
                 
                 // Update interface based on status
                 if (status === 'completed' || status === 'success' || status === 'complete') {
-                    this.updateStatus(`Model ${model_name} download completed!`, 'success');
+                    this.updateStatus(`Model ${model_name} is ready to use!`, 'success');
                     this.elements.progressContainer.classList.add('hidden');
                     this.showStatusHint('');
                     if (data.app_url) {
                         this.showApiUrl(data.app_url);
                     }
                 } else if (status === 'downloading' || status === 'pulling' || status.includes('pulling')) {
-                    this.updateStatus(`Downloading model ${model_name}...`, 'loading');
+                    this.updateStatus(`Downloading ${model_name}, please wait...`, 'loading');
                     this.showProgress(progress, completed, total, data);
                 } else if (status === 'verifying') {
-                    // 验证阶段：保持100%进度，不降低
-                    this.updateStatus(`Verifying model...`, 'loading');
+                    this.updateStatus(`Almost done — verifying model files...`, 'loading');
                     // 如果已经有100%进度，保持100%；否则显示实际进度
                     const verifyProgress = progress >= 100 ? 100 : Math.max(progress, 95);
                     this.showProgress(verifyProgress, completed, total);
                 } else if (status === 'verifying sha256 digest') {
-                    this.updateStatus(`Verifying model file integrity...`, 'loading');
+                    this.updateStatus(`Checking file integrity...`, 'loading');
                     // 如果已经有100%进度，保持100%；否则显示95%
                     const verifyProgress = progress >= 100 ? 100 : 95;
                     this.showProgress(verifyProgress, completed, total);
                 } else if (status === 'writing manifest') {
-                    this.updateStatus(`Writing model manifest file...`, 'loading');
+                    this.updateStatus(`Finishing up — saving model...`, 'loading');
                     // 如果已经有100%进度，保持100%；否则显示98%
                     const verifyProgress = progress >= 100 ? 100 : 98;
                     this.showProgress(verifyProgress, completed, total);
                 } else if (status === 'pulling manifest') {
-                    this.updateStatus(`Pulling model manifest...`, 'loading');
+                    this.updateStatus(`Preparing download for ${model_name}...`, 'loading');
                     this.showProgress(progress, completed, total, data);
                 } else if (status === 'error') {
-                    this.updateStatus('Download error occurred', 'error');
+                    this.updateStatus('Something went wrong', 'error');
                     this.elements.progressContainer.classList.add('hidden');
-                    this.showStatusHint('Refresh the page to retry. <a href="" onclick="location.reload();return false;">Refresh</a>');
+                    this.showStatusHint('Don\'t worry — we\'ll automatically retry in a moment. You can also try now: <button onclick="triggerRetry()" style="background:#4f46e5;color:#fff;border:none;padding:6px 20px;border-radius:6px;cursor:pointer;font-size:14px;margin-left:4px;">Retry Now</button>');
+                } else if (status === 'waiting') {
+                    this.updateStatus(`Waiting for Ollama to start up...`, 'loading');
+                    this.elements.progressContainer.classList.add('hidden');
+                    this.showStatusHint('This may take a few minutes. The model server is still starting or not reachable yet.');
                 } else if (status === 'starting') {
-                    this.updateStatus(`Preparing to download model ${model_name}...`, 'loading');
+                    this.updateStatus(`Getting ready to download ${model_name}...`, 'loading');
                     this.showProgress(0, 0, 0);
                 } else if (status && status.trim() !== '') {
-                    // 对于其他未知状态，显示状态文本和进度
-                    this.updateStatus(`Status: ${statusDisplay}`, 'loading');
+                    this.updateStatus(`${statusDisplay}...`, 'loading');
                     // 如果有进度信息，显示进度；否则显示当前进度或默认值
                     if (total > 0 && completed >= 0) {
                         this.showProgress(progress, completed, total, data);
@@ -414,8 +418,7 @@
                         this.showProgress(95, 0, 0, data);
                     }
                 } else {
-                    // 如果没有状态，显示默认信息
-                    this.updateStatus(`Processing...`, 'loading');
+                    this.updateStatus(`Working on it...`, 'loading');
                     this.showProgress(progress || 0, completed || 0, total || 0, data);
                 }
             }
@@ -477,14 +480,14 @@
                 } else if (progress >= 95) {
                     // Verification and writing phase
                     if (progress >= 98) {
-                        this.elements.progressSize.textContent = 'Completing...';
+                        this.elements.progressSize.textContent = 'Almost there...';
                     } else {
-                        this.elements.progressSize.textContent = 'Verifying...';
+                        this.elements.progressSize.textContent = 'Verifying files...';
                     }
                 } else if (progress > 0) {
                     this.elements.progressSize.textContent = `${percent}%`;
                 } else {
-                    this.elements.progressSize.textContent = 'Preparing download...';
+                    this.elements.progressSize.textContent = 'Starting download...';
                 }
                 
                 const speedEtaText = this.formatSpeedEta(data);
@@ -505,6 +508,19 @@
             }
         }
         
+        // Trigger manual retry via /api/retry
+        function triggerRetry() {
+            const hint = document.getElementById('status-hint');
+            if (hint) hint.innerHTML = 'Retrying — hang tight...';
+            fetch('/api/retry', { method: 'POST' })
+                .then(() => {
+                    if (hint) hint.innerHTML = 'Retry started! The download should begin shortly.';
+                })
+                .catch(() => {
+                    if (hint) hint.innerHTML = 'Could not reach the service. Please wait a moment and try again.';
+                });
+        }
+
         // Copy API URL to clipboard
         function copyApiUrl() {
             const apiUrlLink = document.getElementById('api-url-link');

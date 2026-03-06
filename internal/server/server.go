@@ -137,6 +137,25 @@ func (s *Server) GetProgressManager() *download.ProgressManager {
 	return s.progressManager
 }
 
+// RegisterRetryHandler adds a POST /api/retry endpoint that triggers a
+// manual re-download attempt (wakes up the ensureModelLoop).
+func (s *Server) RegisterRetryHandler(retryCh chan<- struct{}) {
+	s.mux.HandleFunc("/api/retry", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		select {
+		case retryCh <- struct{}{}:
+			log.Printf("Retry triggered via /api/retry")
+		default:
+			log.Printf("Retry already pending")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "retry_triggered"})
+	})
+}
+
 // isAPIPath 检查是否为API路径
 func (s *Server) isAPIPath(path string) bool {
 	return strings.HasPrefix(path, "/api/")

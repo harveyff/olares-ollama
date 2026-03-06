@@ -49,13 +49,14 @@ func main() {
 	log.Printf("Server started on port %d", cfg.Port)
 	log.Printf("You can now view download progress at: http://localhost:%d", cfg.Port)
 
-	// Check and download model in background
-	go func() {
-		if err := ensureModel(ollamaClient, cfg.Model, cfg.OllamaPullDelaySec, srv.GetProgressManager()); err != nil {
-			log.Printf("Failed to ensure model: %v", err)
-			srv.GetProgressManager().UpdateProgress("error", 0, 0, cfg.Model)
-		}
-	}()
+	// Channel for manual retry triggers (from /api/retry endpoint)
+	retryCh := make(chan struct{}, 1)
+
+	// Register /api/retry endpoint
+	srv.RegisterRetryHandler(retryCh)
+
+	// Check and download model in background with infinite retry
+	go ensureModelLoop(ollamaClient, cfg.Model, cfg.OllamaPullDelaySec, srv.GetProgressManager(), retryCh)
 
 	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
@@ -74,12 +75,43 @@ func main() {
 	log.Println("Server exited")
 }
 
+// ensureModelLoop wraps ensureModel with infinite retry: on failure it waits
+// with exponential backoff (up to 5 min) and retries. A signal on retryCh
+// (from /api/retry) wakes it up immediately.
+func ensureModelLoop(client *ollama.Client, modelName string, ollamaPullDelaySec int, progressManager *download.ProgressManager, retryCh <-chan struct{}) {
+	backoff := 30 * time.Second
+	const maxBackoff = 5 * time.Minute
+
+	for {
+		err := ensureModel(client, modelName, ollamaPullDelaySec, progressManager)
+		if err == nil {
+			return
+		}
+
+		log.Printf("Failed to ensure model: %v", err)
+		progressManager.UpdateProgress("error", 0, 0, modelName)
+
+		log.Printf("Will retry in %v (or immediately on /api/retry)...", backoff)
+		select {
+		case <-time.After(backoff):
+		case <-retryCh:
+			log.Printf("Manual retry triggered via /api/retry")
+		}
+
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+}
+
 func ensureModel(client *ollama.Client, modelName string, ollamaPullDelaySec int, progressManager *download.ProgressManager) error {
 	// Wait for Ollama to be reachable (e.g. when proxy and Ollama run in separate pods)
 	ctx := context.Background()
-	const ollamaWaitTimeout = 10 * time.Minute
+	const ollamaWaitTimeout = 30 * time.Minute
 	const ollamaRetryInterval = 5 * time.Second
 	log.Printf("Waiting for Ollama server (up to %v)...", ollamaWaitTimeout)
+	progressManager.UpdateProgress("waiting", 0, 0, modelName)
 	if err := client.WaitForOllama(ctx, ollamaWaitTimeout, ollamaRetryInterval); err != nil {
 		return fmt.Errorf("Ollama not ready: %w", err)
 	}
