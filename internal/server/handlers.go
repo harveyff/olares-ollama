@@ -721,9 +721,7 @@ func (s *Server) handleOpenAIInferenceRequest(w http.ResponseWriter, r *http.Req
 	log.Printf(">>> Parsed OpenAI request: model=%v, stream=%v, messages count=%d <<<",
 		openaiRequest["model"], openaiRequest["stream"], len(messages))
 	
-	// Convert messages: handle OpenAI multimodal content format
-	// OpenAI content can be a plain string OR an array like [{"type":"text","text":"..."}]
-	// Ollama only accepts plain string content, so we need to flatten arrays.
+	// Convert messages: handle OpenAI multimodal content format and tool calling fields.
 	ollamaMessages := []map[string]interface{}{}
 	for i, msg := range messages {
 		msgMap, ok := msg.(map[string]interface{})
@@ -732,10 +730,23 @@ func (s *Server) handleOpenAIInferenceRequest(w http.ResponseWriter, r *http.Req
 			continue
 		}
 		content := flattenContent(msgMap["content"])
-		ollamaMessages = append(ollamaMessages, map[string]interface{}{
+		ollamaMsg := map[string]interface{}{
 			"role":    msgMap["role"],
 			"content": content,
-		})
+		}
+		// Forward tool_calls from assistant messages (OpenAI string args → Ollama map args)
+		if tcs, ok := msgMap["tool_calls"].([]interface{}); ok && len(tcs) > 0 {
+			ollamaMsg["tool_calls"] = convertOpenAIToolCallsToOllama(tcs)
+		}
+		// Forward tool_call_id for tool-result messages
+		if tcID, ok := msgMap["tool_call_id"].(string); ok {
+			ollamaMsg["tool_call_id"] = tcID
+		}
+		// Forward name field (used in multi-tool scenarios)
+		if name, ok := msgMap["name"].(string); ok {
+			ollamaMsg["name"] = name
+		}
+		ollamaMessages = append(ollamaMessages, ollamaMsg)
 	}
 	
 	if len(ollamaMessages) == 0 {
@@ -756,6 +767,13 @@ func (s *Server) handleOpenAIInferenceRequest(w http.ResponseWriter, r *http.Req
 		"model":    s.config.Model,
 		"messages": ollamaMessages,
 		"stream":   stream,
+	}
+	// Pass through tools and tool_choice for function/tool calling
+	if tools, ok := openaiRequest["tools"]; ok {
+		ollamaRequest["tools"] = tools
+	}
+	if toolChoice, ok := openaiRequest["tool_choice"]; ok {
+		ollamaRequest["tool_choice"] = toolChoice
 	}
 	// Pass through "think" for Qwen3.5/DeepSeek: from top-level "think", or extra_body.think, or extra_body.reasoning
 	if thinkVal, ok := openaiRequest["think"]; ok {
@@ -865,6 +883,22 @@ func (s *Server) convertOllamaToOpenAI(w http.ResponseWriter, body io.Reader, mo
 		role = "assistant"
 	}
 	
+	// Build response message and determine finish_reason
+	respMessage := map[string]interface{}{
+		"role":    role,
+		"content": content,
+	}
+	finishReason := "stop"
+	
+	// Handle tool_calls in response
+	if rawToolCalls, ok := message["tool_calls"].([]interface{}); ok && len(rawToolCalls) > 0 {
+		respMessage["tool_calls"] = convertOllamaToolCallsToOpenAI(rawToolCalls)
+		finishReason = "tool_calls"
+		if content == "" {
+			respMessage["content"] = nil
+		}
+	}
+	
 	// Create OpenAI format response
 	openAIResp := map[string]interface{}{
 		"id":      fmt.Sprintf("chatcmpl-%d", time.Now().Unix()),
@@ -873,12 +907,9 @@ func (s *Server) convertOllamaToOpenAI(w http.ResponseWriter, body io.Reader, mo
 		"model":   modelName,
 		"choices": []map[string]interface{}{
 			{
-				"index": 0,
-				"message": map[string]interface{}{
-					"role":    role,
-					"content": content,
-				},
-				"finish_reason": "stop",
+				"index":         0,
+				"message":       respMessage,
+				"finish_reason": finishReason,
 			},
 		},
 		"usage": map[string]interface{}{
@@ -935,9 +966,43 @@ func (s *Server) convertOllamaStreamToOpenAI(w http.ResponseWriter, body io.Read
 			continue
 		}
 		
-		// Check if done first
+		// Extract message (present in both intermediate and final chunks)
+		message, _ := ollamaResp["message"].(map[string]interface{})
+
 		done, _ := ollamaResp["done"].(bool)
 		if done {
+			finishReason := "stop"
+			finalDelta := map[string]interface{}{}
+
+			// Ollama sends tool_calls in the final message when done
+			if message != nil {
+				if rawTC, ok := message["tool_calls"].([]interface{}); ok && len(rawTC) > 0 {
+					finalDelta["tool_calls"] = convertOllamaToolCallsToOpenAI(rawTC)
+					finishReason = "tool_calls"
+				}
+			}
+
+			// If there's tool_calls data, send a content chunk first
+			if len(finalDelta) > 0 {
+				tcChunk := map[string]interface{}{
+					"id":      responseID,
+					"object":  "chat.completion.chunk",
+					"created": created,
+					"model":   modelName,
+					"choices": []map[string]interface{}{
+						{
+							"index": 0,
+							"delta": finalDelta,
+						},
+					},
+				}
+				tcJSON, _ := json.Marshal(tcChunk)
+				w.Write([]byte(fmt.Sprintf("data: %s\n\n", tcJSON)))
+				if hasFlusher {
+					flusher.Flush()
+				}
+			}
+
 			// Send final chunk with finish_reason
 			finalChunk := map[string]interface{}{
 				"id":      responseID,
@@ -948,7 +1013,7 @@ func (s *Server) convertOllamaStreamToOpenAI(w http.ResponseWriter, body io.Read
 					{
 						"index":         0,
 						"delta":         map[string]interface{}{},
-						"finish_reason": "stop",
+						"finish_reason": finishReason,
 					},
 				},
 			}
@@ -961,9 +1026,7 @@ func (s *Server) convertOllamaStreamToOpenAI(w http.ResponseWriter, body io.Read
 			break
 		}
 		
-		// Extract message content (Ollama may send incremental content)
-		message, ok := ollamaResp["message"].(map[string]interface{})
-		if !ok {
+		if message == nil {
 			continue
 		}
 		
@@ -978,6 +1041,11 @@ func (s *Server) convertOllamaStreamToOpenAI(w http.ResponseWriter, body io.Read
 		}
 		if content != "" {
 			delta["content"] = content
+		}
+
+		// Handle intermediate tool_calls chunks (some Ollama versions stream them)
+		if rawTC, ok := message["tool_calls"].([]interface{}); ok && len(rawTC) > 0 {
+			delta["tool_calls"] = convertOllamaToolCallsToOpenAI(rawTC)
 		}
 		
 		// Only send chunk if there's content
@@ -2164,4 +2232,74 @@ func flattenContent(content interface{}) string {
 		}
 	}
 	return strings.Join(parts, "")
+}
+
+// convertOpenAIToolCallsToOllama converts tool_calls from OpenAI format (arguments is
+// a JSON string) to Ollama format (arguments is a map).
+func convertOpenAIToolCallsToOllama(toolCalls []interface{}) []map[string]interface{} {
+	var result []map[string]interface{}
+	for _, tc := range toolCalls {
+		tcMap, ok := tc.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		fn, ok := tcMap["function"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		ollamaTC := map[string]interface{}{
+			"function": map[string]interface{}{
+				"name": fn["name"],
+			},
+		}
+		if argsStr, ok := fn["arguments"].(string); ok {
+			var argsMap map[string]interface{}
+			if json.Unmarshal([]byte(argsStr), &argsMap) == nil {
+				ollamaTC["function"].(map[string]interface{})["arguments"] = argsMap
+			} else {
+				ollamaTC["function"].(map[string]interface{})["arguments"] = argsStr
+			}
+		} else {
+			ollamaTC["function"].(map[string]interface{})["arguments"] = fn["arguments"]
+		}
+		result = append(result, ollamaTC)
+	}
+	return result
+}
+
+// convertOllamaToolCallsToOpenAI converts tool_calls from Ollama format (arguments is
+// a map) to OpenAI format (arguments is a JSON string, with id and type fields).
+func convertOllamaToolCallsToOpenAI(toolCalls []interface{}) []map[string]interface{} {
+	var result []map[string]interface{}
+	for i, tc := range toolCalls {
+		tcMap, ok := tc.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		fn, ok := tcMap["function"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		argsStr := "{}"
+		if args := fn["arguments"]; args != nil {
+			if s, ok := args.(string); ok {
+				argsStr = s
+			} else {
+				if b, err := json.Marshal(args); err == nil {
+					argsStr = string(b)
+				}
+			}
+		}
+		openAITC := map[string]interface{}{
+			"id":    fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), i),
+			"index": i,
+			"type":  "function",
+			"function": map[string]interface{}{
+				"name":      fn["name"],
+				"arguments": argsStr,
+			},
+		}
+		result = append(result, openAITC)
+	}
+	return result
 }
