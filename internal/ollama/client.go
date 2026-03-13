@@ -490,6 +490,67 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 	return fmt.Errorf("model %s download reported success but model is not available in Ollama", modelName)
 }
 
+// CreateRequest represents an ollama create request.
+type CreateRequest struct {
+	Name      string `json:"name"`
+	Modelfile string `json:"modelfile"`
+}
+
+// CreateResponse represents a streamed response from ollama create.
+type CreateResponse struct {
+	Status string `json:"status"`
+}
+
+// CreateModelWithProgress registers a local GGUF with Ollama via POST /api/create.
+func (c *Client) CreateModelWithProgress(modelName, modelfile string, progressUpdater ProgressUpdater) error {
+	createReq := CreateRequest{Name: modelName, Modelfile: modelfile}
+	jsonData, err := json.Marshal(createReq)
+	if err != nil {
+		return err
+	}
+
+	progressUpdater.UpdateProgress("creating", 0, 0, modelName)
+	log.Printf("Creating model %s via /api/create ...", modelName)
+
+	resp, err := c.downloadClient.Post(
+		c.baseURL+"/api/create",
+		"application/json",
+		bytes.NewBuffer(jsonData),
+	)
+	if err != nil {
+		progressUpdater.UpdateProgress("error", 0, 0, modelName)
+		return fmt.Errorf("create request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		progressUpdater.UpdateProgress("error", 0, 0, modelName)
+		return fmt.Errorf("create model failed (HTTP %s): %s", resp.Status, string(body))
+	}
+
+	decoder := json.NewDecoder(bufio.NewReaderSize(resp.Body, 64*1024))
+	for {
+		var cr CreateResponse
+		if err := decoder.Decode(&cr); err == io.EOF {
+			break
+		} else if err != nil {
+			progressUpdater.UpdateProgress("error", 0, 0, modelName)
+			return fmt.Errorf("decode create response: %w", err)
+		}
+		log.Printf("Create status: %s", cr.Status)
+		progressUpdater.UpdateProgress("creating", 0, 0, modelName)
+		if cr.Status == "success" {
+			log.Printf("Model %s created successfully", modelName)
+			progressUpdater.UpdateProgress("completed", 0, 0, modelName)
+			return nil
+		}
+	}
+
+	progressUpdater.UpdateProgress("error", 0, 0, modelName)
+	return fmt.Errorf("create stream ended without success for model %s", modelName)
+}
+
 // ProxyRequest 代理请求到Ollama
 func (c *Client) ProxyRequest(method, path string, body io.Reader, headers map[string]string) (*http.Response, error) {
 	url := c.baseURL + path

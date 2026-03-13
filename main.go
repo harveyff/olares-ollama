@@ -13,6 +13,7 @@ import (
 
 	"olares-ollama/internal/config"
 	"olares-ollama/internal/download"
+	"olares-ollama/internal/huggingface"
 	"olares-ollama/internal/ollama"
 	"olares-ollama/internal/server"
 )
@@ -22,7 +23,13 @@ func main() {
 	cfg := config.Load()
 
 	log.Printf("Starting Olares-Ollama proxy server...")
-	log.Printf("Target model: %s", cfg.Model)
+	if cfg.GGUFMode {
+		log.Printf("Running in GGUF mode: repo=%s file=%s model=%s", cfg.HFRepo, cfg.HFFile, cfg.Model)
+	} else if cfg.BaseMode {
+		log.Printf("Running in BASE mode (no model configured)")
+	} else {
+		log.Printf("Target model: %s", cfg.Model)
+	}
 	log.Printf("Ollama server: %s", cfg.OllamaURL)
 	log.Printf("Download timeout: %d minutes", cfg.DownloadTimeout)
 
@@ -47,16 +54,21 @@ func main() {
 	}()
 
 	log.Printf("Server started on port %d", cfg.Port)
-	log.Printf("You can now view download progress at: http://localhost:%d", cfg.Port)
 
-	// Channel for manual retry triggers (from /api/retry endpoint)
-	retryCh := make(chan struct{}, 1)
+	if !cfg.BaseMode {
+		log.Printf("You can now view download progress at: http://localhost:%d", cfg.Port)
 
-	// Register /api/retry endpoint
-	srv.RegisterRetryHandler(retryCh)
+		// Channel for manual retry triggers (from /api/retry endpoint)
+		retryCh := make(chan struct{}, 1)
 
-	// Check and download model in background with infinite retry
-	go ensureModelLoop(ollamaClient, cfg.Model, cfg.OllamaPullDelaySec, srv.GetProgressManager(), retryCh)
+		// Register /api/retry endpoint
+		srv.RegisterRetryHandler(retryCh)
+
+		// Check and download model in background with infinite retry
+		go ensureModelLoop(ollamaClient, cfg, srv.GetProgressManager(), retryCh)
+	} else {
+		log.Printf("Base mode UI at: http://localhost:%d", cfg.Port)
+	}
 
 	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
@@ -80,15 +92,19 @@ func main() {
 // (from /api/retry) wakes it up immediately.
 // After success, it monitors Ollama health; if Ollama goes down, it re-enters
 // the retry loop so the frontend always reflects the real state.
-func ensureModelLoop(client *ollama.Client, modelName string, ollamaPullDelaySec int, progressManager *download.ProgressManager, retryCh <-chan struct{}) {
+func ensureModelLoop(client *ollama.Client, cfg *config.Config, progressManager *download.ProgressManager, retryCh <-chan struct{}) {
+	modelName := cfg.Model
 	backoff := 30 * time.Second
 	const maxBackoff = 5 * time.Minute
 
 	for {
-		err := ensureModel(client, modelName, ollamaPullDelaySec, progressManager)
+		var err error
+		if cfg.GGUFMode {
+			err = ensureModelGGUF(client, cfg, progressManager)
+		} else {
+			err = ensureModel(client, modelName, cfg.OllamaPullDelaySec, progressManager)
+		}
 		if err == nil {
-			// Model is ready — start monitoring Ollama health.
-			// If Ollama goes down, this function returns and we re-enter the loop.
 			monitorOllamaHealth(client, modelName, progressManager, retryCh)
 			// Ollama went down — reset backoff and retry from the beginning
 			log.Printf("Ollama became unreachable, re-entering ensure model loop...")
@@ -155,6 +171,56 @@ func monitorOllamaHealth(client *ollama.Client, modelName string, progressManage
 			progressManager.UpdateProgress("completed", 0, 0, modelName)
 		}
 	}
+}
+
+// ensureModelGGUF downloads a GGUF from Hugging Face and registers it via ollama create.
+func ensureModelGGUF(client *ollama.Client, cfg *config.Config, progressManager *download.ProgressManager) error {
+	modelName := cfg.Model
+	if modelName == "" {
+		modelName = strings.TrimSuffix(cfg.HFFile, ".gguf")
+	}
+
+	ctx := context.Background()
+
+	// Wait for Ollama
+	log.Printf("GGUF mode: waiting for Ollama server...")
+	progressManager.UpdateProgress("waiting", 0, 0, modelName)
+	if err := client.WaitForOllama(ctx, 30*time.Minute, 5*time.Second); err != nil {
+		return fmt.Errorf("Ollama not ready: %w", err)
+	}
+
+	// Check if model already registered
+	exists, err := client.ModelExists(modelName)
+	if err == nil && exists {
+		log.Printf("GGUF model %s already registered in Ollama", modelName)
+		progressManager.UpdateProgress("completed", 0, 0, modelName)
+		return nil
+	}
+
+	// Download GGUF
+	dl := huggingface.New(cfg.HFEndpoint, cfg.HFRepo, cfg.HFFile, cfg.HFToken, cfg.GGUFDir)
+	if !dl.AlreadyDone() {
+		log.Printf("Downloading GGUF: %s/%s -> %s", cfg.HFRepo, cfg.HFFile, dl.DestPath())
+		if err := dl.Download(ctx, modelName, progressManager); err != nil {
+			return fmt.Errorf("GGUF download failed: %w", err)
+		}
+	} else {
+		log.Printf("GGUF file already downloaded: %s", dl.DestPath())
+	}
+
+	// Build Modelfile
+	modelfile := cfg.Modelfile
+	if modelfile == "" {
+		modelfile = fmt.Sprintf("FROM %s", dl.DestPath())
+	}
+	log.Printf("Creating model %s with Modelfile:\n%s", modelName, modelfile)
+
+	if err := client.CreateModelWithProgress(modelName, modelfile, progressManager); err != nil {
+		return fmt.Errorf("ollama create failed: %w", err)
+	}
+
+	log.Printf("GGUF model %s ready", modelName)
+	return nil
 }
 
 func ensureModel(client *ollama.Client, modelName string, ollamaPullDelaySec int, progressManager *download.ProgressManager) error {

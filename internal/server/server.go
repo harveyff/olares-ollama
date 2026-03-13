@@ -43,6 +43,9 @@ func (s *Server) setupRoutes() {
 	s.mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("./web/static/"))))
 	s.mux.HandleFunc("/", s.handleIndex)
 
+	// Base mode API endpoints (available in both modes)
+	s.mux.HandleFunc("/api/base/info", s.handleBaseInfo)
+
 	// 进度API
 	s.mux.HandleFunc("/api/progress", s.progressManager.HandleProgressAPI)
 
@@ -74,10 +77,67 @@ func (s *Server) setupRoutes() {
 // handleIndex 处理首页请求
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/" {
-		http.Redirect(w, r, "/static/index.html", http.StatusMovedPermanently)
+		if s.config.BaseMode {
+			http.Redirect(w, r, "/static/base.html", http.StatusMovedPermanently)
+		} else {
+			http.Redirect(w, r, "/static/index.html", http.StatusMovedPermanently)
+		}
 		return
 	}
 	http.NotFound(w, r)
+}
+
+// handleBaseInfo returns Ollama version and model list for the base mode UI
+func (s *Server) handleBaseInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	result := map[string]interface{}{
+		"base_mode": s.config.BaseMode,
+	}
+
+	headers := make(map[string]string)
+
+	// Fetch Ollama version
+	versionResp, err := s.ollamaClient.ProxyRequest("GET", "/api/version", nil, headers)
+	if err != nil {
+		result["version"] = nil
+		result["version_error"] = err.Error()
+	} else {
+		defer versionResp.Body.Close()
+		var versionData map[string]interface{}
+		if err := json.NewDecoder(versionResp.Body).Decode(&versionData); err == nil {
+			result["version"] = versionData["version"]
+		} else {
+			result["version"] = nil
+			result["version_error"] = "failed to parse version"
+		}
+	}
+
+	// Fetch model list (unfiltered)
+	tagsResp, err := s.ollamaClient.ProxyRequest("GET", "/api/tags", nil, headers)
+	if err != nil {
+		result["models"] = []interface{}{}
+		result["models_error"] = err.Error()
+	} else {
+		defer tagsResp.Body.Close()
+		var tagsData map[string]interface{}
+		if err := json.NewDecoder(tagsResp.Body).Decode(&tagsData); err == nil {
+			if models, ok := tagsData["models"].([]interface{}); ok {
+				result["models"] = models
+			} else {
+				result["models"] = []interface{}{}
+			}
+		} else {
+			result["models"] = []interface{}{}
+			result["models_error"] = "failed to parse models"
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 
 // handleHealth 健康检查
