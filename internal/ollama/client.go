@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -490,10 +491,81 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 	return fmt.Errorf("model %s download reported success but model is not available in Ollama", modelName)
 }
 
-// CreateRequest represents an ollama create request.
+// BlobExists checks whether a blob with the given digest already exists on the
+// Ollama server (HEAD /api/blobs/:digest).
+func (c *Client) BlobExists(digest string) (bool, error) {
+	req, err := http.NewRequest(http.MethodHead, c.baseURL+"/api/blobs/"+digest, nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK, nil
+}
+
+// PushBlob uploads a local file as a blob to the Ollama server
+// (POST /api/blobs/:digest). The file is streamed so memory usage stays low
+// even for multi-GiB GGUF files.
+func (c *Client) PushBlob(digest, filePath string, progressUpdater ProgressUpdater, modelName string) error {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("open file for blob push: %w", err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat file: %w", err)
+	}
+	fileSize := info.Size()
+
+	log.Printf("Pushing blob %s (%d bytes / %.2f GiB) to Ollama...", digest, fileSize, float64(fileSize)/(1024*1024*1024))
+	progressUpdater.UpdateProgress("pushing_blob", 0, fileSize, modelName)
+
+	url := c.baseURL + "/api/blobs/" + digest
+	req, err := http.NewRequest(http.MethodPost, url, f)
+	if err != nil {
+		return fmt.Errorf("create push request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.ContentLength = fileSize
+
+	// Use a client with no overall timeout for large uploads
+	blobClient := &http.Client{
+		Timeout: 0,
+		Transport: &http.Transport{
+			IdleConnTimeout:       10 * time.Minute,
+			ResponseHeaderTimeout: 10 * time.Minute,
+			ExpectContinueTimeout: 30 * time.Second,
+		},
+	}
+
+	resp, err := blobClient.Do(req)
+	if err != nil {
+		progressUpdater.UpdateProgress("error", 0, 0, modelName)
+		return fmt.Errorf("push blob request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		progressUpdater.UpdateProgress("error", 0, 0, modelName)
+		return fmt.Errorf("push blob failed (HTTP %s): %s", resp.Status, string(body))
+	}
+
+	log.Printf("Blob %s pushed successfully", digest)
+	progressUpdater.UpdateProgress("blob_pushed", fileSize, fileSize, modelName)
+	return nil
+}
+
+// CreateRequest represents the new-format ollama create request (Ollama >=0.5).
 type CreateRequest struct {
-	Name      string `json:"name"`
-	Modelfile string `json:"modelfile"`
+	Model      string                 `json:"model"`
+	Files      map[string]string      `json:"files,omitempty"`
+	Parameters map[string]interface{} `json:"parameters,omitempty"`
 }
 
 // CreateResponse represents a streamed response from ollama create.
@@ -501,16 +573,24 @@ type CreateResponse struct {
 	Status string `json:"status"`
 }
 
-// CreateModelWithProgress registers a local GGUF with Ollama via POST /api/create.
-func (c *Client) CreateModelWithProgress(modelName, modelfile string, progressUpdater ProgressUpdater) error {
-	createReq := CreateRequest{Name: modelName, Modelfile: modelfile}
+// CreateModelFromGGUF registers a GGUF blob as a named model.
+// The blob must already have been pushed via PushBlob.
+//
+//	files: {"filename.gguf": "sha256:abc..."}
+//	params: optional model parameters, e.g. {"num_ctx": 128000}
+func (c *Client) CreateModelFromGGUF(modelName string, files map[string]string, params map[string]interface{}, progressUpdater ProgressUpdater) error {
+	createReq := CreateRequest{
+		Model:      modelName,
+		Files:      files,
+		Parameters: params,
+	}
 	jsonData, err := json.Marshal(createReq)
 	if err != nil {
 		return err
 	}
 
 	progressUpdater.UpdateProgress("creating", 0, 0, modelName)
-	log.Printf("Creating model %s via /api/create ...", modelName)
+	log.Printf("Creating model %s via /api/create (files: %v, params: %v)...", modelName, files, params)
 
 	resp, err := c.downloadClient.Post(
 		c.baseURL+"/api/create",

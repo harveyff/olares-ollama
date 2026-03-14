@@ -21,7 +21,7 @@ type Config struct {
 	HFFile     string // GGUF filename, e.g. "Qwen3.5-35B-A3B-UD-Q4_K_L.gguf"
 	HFToken    string // Optional HF auth token
 	GGUFDir    string // Directory to save GGUF, default "/models"
-	Modelfile  string // Full Modelfile content for ollama create
+	GGUFParams string // JSON dict of model parameters, e.g. {"num_ctx":128000}
 	GGUFMode   bool   // Auto-set: true when HFRepo and HFFile are both set
 }
 
@@ -46,7 +46,7 @@ func Load() *Config {
 		HFFile:     hfFile,
 		HFToken:    getEnv("HF_TOKEN", ""),
 		GGUFDir:    getEnv("GGUF_DIR", "/models"),
-		Modelfile:  getEnv("MODELFILE", ""),
+		GGUFParams: getEnv("GGUF_PARAMS", ""),
 		GGUFMode:   ggufMode,
 	}
 

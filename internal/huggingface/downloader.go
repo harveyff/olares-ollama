@@ -2,6 +2,8 @@ package huggingface
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -212,4 +214,48 @@ func (d *Downloader) Download(ctx context.Context, modelName string, progress Pr
 	log.Printf("GGUF download complete: %s (%d bytes)", dest, written)
 	progress.UpdateProgress("downloaded", written, totalSize, modelName)
 	return nil
+}
+
+// ComputeSHA256 returns "sha256:<hex>" for the given file.
+// The result is cached in a sibling .sha256 file so that repeated calls on
+// the same (unchanged) GGUF skip the expensive re-hash.
+func ComputeSHA256(filePath string) (string, error) {
+	cacheFile := filePath + ".sha256"
+
+	// If cache exists and the GGUF hasn't been modified after it, reuse.
+	if cInfo, cErr := os.Stat(cacheFile); cErr == nil {
+		if fInfo, fErr := os.Stat(filePath); fErr == nil && !fInfo.ModTime().After(cInfo.ModTime()) {
+			if data, err := os.ReadFile(cacheFile); err == nil {
+				digest := strings.TrimSpace(string(data))
+				if strings.HasPrefix(digest, "sha256:") && len(digest) == 71 {
+					log.Printf("Using cached SHA256 for %s: %s", filepath.Base(filePath), digest)
+					return digest, nil
+				}
+			}
+		}
+	}
+
+	log.Printf("Computing SHA256 for %s (this may take a while for large files)...", filepath.Base(filePath))
+	start := time.Now()
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", fmt.Errorf("open file for hashing: %w", err)
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("hash file: %w", err)
+	}
+
+	digest := "sha256:" + hex.EncodeToString(h.Sum(nil))
+	log.Printf("SHA256 computed in %v: %s", time.Since(start).Round(time.Second), digest)
+
+	// Cache the result
+	if err := os.WriteFile(cacheFile, []byte(digest+"\n"), 0644); err != nil {
+		log.Printf("Warning: failed to cache SHA256: %v", err)
+	}
+
+	return digest, nil
 }

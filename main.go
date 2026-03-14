@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -173,7 +174,8 @@ func monitorOllamaHealth(client *ollama.Client, modelName string, progressManage
 	}
 }
 
-// ensureModelGGUF downloads a GGUF from Hugging Face and registers it via ollama create.
+// ensureModelGGUF downloads a GGUF from Hugging Face, pushes it as an Ollama
+// blob, and registers the model via POST /api/create with the files field.
 func ensureModelGGUF(client *ollama.Client, cfg *config.Config, progressManager *download.ProgressManager) error {
 	modelName := cfg.Model
 	if modelName == "" {
@@ -208,14 +210,41 @@ func ensureModelGGUF(client *ollama.Client, cfg *config.Config, progressManager 
 		log.Printf("GGUF file already downloaded: %s", dl.DestPath())
 	}
 
-	// Build Modelfile
-	modelfile := cfg.Modelfile
-	if modelfile == "" {
-		modelfile = fmt.Sprintf("FROM %s", dl.DestPath())
+	// Compute SHA256 of the GGUF file
+	progressManager.UpdateProgress("hashing", 0, 0, modelName)
+	digest, err := huggingface.ComputeSHA256(dl.DestPath())
+	if err != nil {
+		return fmt.Errorf("compute SHA256: %w", err)
 	}
-	log.Printf("Creating model %s with Modelfile:\n%s", modelName, modelfile)
+	log.Printf("GGUF digest: %s", digest)
 
-	if err := client.CreateModelWithProgress(modelName, modelfile, progressManager); err != nil {
+	// Push blob if not already present
+	blobExists, err := client.BlobExists(digest)
+	if err != nil {
+		log.Printf("Warning: blob existence check failed: %v, will try pushing anyway", err)
+		blobExists = false
+	}
+	if blobExists {
+		log.Printf("Blob %s already exists on Ollama server, skipping push", digest)
+	} else {
+		if err := client.PushBlob(digest, dl.DestPath(), progressManager, modelName); err != nil {
+			return fmt.Errorf("push blob: %w", err)
+		}
+	}
+
+	// Create model via /api/create with files map
+	files := map[string]string{
+		cfg.HFFile: digest,
+	}
+
+	var params map[string]interface{}
+	if cfg.GGUFParams != "" {
+		if err := json.Unmarshal([]byte(cfg.GGUFParams), &params); err != nil {
+			log.Printf("Warning: failed to parse GGUF_PARAMS JSON (%q): %v, ignoring", cfg.GGUFParams, err)
+		}
+	}
+
+	if err := client.CreateModelFromGGUF(modelName, files, params, progressManager); err != nil {
 		return fmt.Errorf("ollama create failed: %w", err)
 	}
 
