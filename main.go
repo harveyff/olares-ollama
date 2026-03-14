@@ -191,12 +191,11 @@ func ensureModelGGUF(client *ollama.Client, cfg *config.Config, progressManager 
 		return fmt.Errorf("Ollama not ready: %w", err)
 	}
 
-	// Check if model already registered
-	exists, err := client.ModelExists(modelName)
-	if err == nil && exists {
-		log.Printf("GGUF model %s already registered in Ollama", modelName)
-		progressManager.UpdateProgress("completed", 0, 0, modelName)
-		return nil
+	// Check current state (informational only; we always (re-)create to
+	// ensure template/params updates take effect).
+	exists, _ := client.ModelExists(modelName)
+	if exists {
+		log.Printf("GGUF model %s already registered, will re-create to apply latest config", modelName)
 	}
 
 	// Download GGUF
@@ -244,7 +243,12 @@ func ensureModelGGUF(client *ollama.Client, cfg *config.Config, progressManager 
 		}
 	}
 
-	if err := client.CreateModelFromGGUF(modelName, files, params, progressManager); err != nil {
+	tpl := cfg.ResolveTemplate()
+	if tpl != "" {
+		log.Printf("Using explicit template (name=%q, len=%d)", cfg.GGUFTemplateName, len(tpl))
+	}
+
+	if err := client.CreateModelFromGGUF(modelName, files, params, tpl, cfg.GGUFSystem, progressManager); err != nil {
 		return fmt.Errorf("ollama create failed: %w", err)
 	}
 

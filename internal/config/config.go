@@ -20,9 +20,12 @@ type Config struct {
 	HFRepo     string // HF repo, e.g. "unsloth/Qwen3.5-35B-A3B-GGUF"
 	HFFile     string // GGUF filename, e.g. "Qwen3.5-35B-A3B-UD-Q4_K_L.gguf"
 	HFToken    string // Optional HF auth token
-	GGUFDir    string // Directory to save GGUF, default "/models"
-	GGUFParams string // JSON dict of model parameters, e.g. {"num_ctx":128000}
-	GGUFMode   bool   // Auto-set: true when HFRepo and HFFile are both set
+	GGUFDir          string // Directory to save GGUF, default "/models"
+	GGUFParams       string // JSON dict of model parameters, e.g. {"num_ctx":128000}
+	GGUFTemplateName string // Named template: "chatml", "llama3", etc. Resolved to Go template in code
+	GGUFTemplate     string // Raw Go template override (takes precedence over TemplateName)
+	GGUFSystem       string // System prompt baked into the model
+	GGUFMode         bool   // Auto-set: true when HFRepo and HFFile are both set
 }
 
 // Load loads configuration from environment variables
@@ -45,12 +48,49 @@ func Load() *Config {
 		HFRepo:     hfRepo,
 		HFFile:     hfFile,
 		HFToken:    getEnv("HF_TOKEN", ""),
-		GGUFDir:    getEnv("GGUF_DIR", "/models"),
-		GGUFParams: getEnv("GGUF_PARAMS", ""),
-		GGUFMode:   ggufMode,
+		GGUFDir:          getEnv("GGUF_DIR", "/models"),
+		GGUFParams:       getEnv("GGUF_PARAMS", ""),
+		GGUFTemplateName: getEnv("GGUF_TEMPLATE_NAME", ""),
+		GGUFTemplate:     getEnv("GGUF_TEMPLATE", ""),
+		GGUFSystem:       getEnv("GGUF_SYSTEM", ""),
+		GGUFMode:         ggufMode,
 	}
 
 	return cfg
+}
+
+// Built-in Go templates for common chat formats.
+// Ollama uses Go text/template; these mirror Ollama's library templates.
+var builtinTemplates = map[string]string{
+	"chatml": `{{- if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{- range .Messages }}{{- if eq .Role "user" }}<|im_start|>user
+{{ .Content }}<|im_end|>
+{{ else if eq .Role "assistant" }}<|im_start|>assistant
+{{ .Content }}<|im_end|>
+{{ end }}{{- end }}<|im_start|>assistant
+`,
+	"llama3": `{{- if .System }}<|start_header_id|>system<|end_header_id|>
+
+{{ .System }}<|eot_id|>{{ end }}{{- range .Messages }}{{- if eq .Role "user" }}<|start_header_id|>user<|end_header_id|>
+
+{{ .Content }}<|eot_id|>{{ else if eq .Role "assistant" }}<|start_header_id|>assistant<|end_header_id|>
+
+{{ .Content }}<|eot_id|>{{ end }}{{- end }}<|start_header_id|>assistant<|end_header_id|>
+
+`,
+}
+
+// ResolveTemplate returns the Go template string. GGUFTemplate (raw) takes
+// precedence; otherwise GGUFTemplateName is looked up in the built-in map.
+func (c *Config) ResolveTemplate() string {
+	if c.GGUFTemplate != "" {
+		return c.GGUFTemplate
+	}
+	if t, ok := builtinTemplates[c.GGUFTemplateName]; ok {
+		return t
+	}
+	return ""
 }
 
 // getEnv gets environment variable, returns default value if not exists

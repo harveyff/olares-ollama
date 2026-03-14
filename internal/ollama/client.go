@@ -566,6 +566,8 @@ type CreateRequest struct {
 	Model      string                 `json:"model"`
 	Files      map[string]string      `json:"files,omitempty"`
 	Parameters map[string]interface{} `json:"parameters,omitempty"`
+	Template   string                 `json:"template,omitempty"`
+	System     string                 `json:"system,omitempty"`
 }
 
 // CreateResponse represents a streamed response from ollama create.
@@ -578,11 +580,13 @@ type CreateResponse struct {
 //
 //	files: {"filename.gguf": "sha256:abc..."}
 //	params: optional model parameters, e.g. {"num_ctx": 128000}
-func (c *Client) CreateModelFromGGUF(modelName string, files map[string]string, params map[string]interface{}, progressUpdater ProgressUpdater) error {
+func (c *Client) CreateModelFromGGUF(modelName string, files map[string]string, params map[string]interface{}, template, system string, progressUpdater ProgressUpdater) error {
 	createReq := CreateRequest{
 		Model:      modelName,
 		Files:      files,
 		Parameters: params,
+		Template:   template,
+		System:     system,
 	}
 	jsonData, err := json.Marshal(createReq)
 	if err != nil {
@@ -590,7 +594,8 @@ func (c *Client) CreateModelFromGGUF(modelName string, files map[string]string, 
 	}
 
 	progressUpdater.UpdateProgress("creating", 0, 0, modelName)
-	log.Printf("Creating model %s via /api/create (files: %v, params: %v)...", modelName, files, params)
+	log.Printf("Creating model %s via /api/create (files: %v, params: %v, hasTemplate: %v)...",
+		modelName, files, params, template != "")
 
 	resp, err := c.downloadClient.Post(
 		c.baseURL+"/api/create",
