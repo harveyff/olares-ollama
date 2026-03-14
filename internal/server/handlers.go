@@ -32,6 +32,27 @@ func toBool(v interface{}) bool {
 	return false
 }
 
+// matchesModel returns true when ollamaName matches the configured model.
+// Ollama appends ":latest" by default, so "foo" matches "foo:latest" and vice versa.
+func matchesModel(ollamaName, configured string) bool {
+	if ollamaName == configured {
+		return true
+	}
+	// "model" matches "model:latest"
+	if ollamaName == configured+":latest" {
+		return true
+	}
+	// "model:latest" matches "model"
+	if configured == ollamaName+":latest" {
+		return true
+	}
+	// prefix match: configured "model" matches "model:tag"
+	if !strings.Contains(configured, ":") && strings.HasPrefix(ollamaName, configured+":") {
+		return true
+	}
+	return false
+}
+
 // handleTags handles model list requests, forwards from ollama and filters by configured models
 func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
 	log.Printf("=== Tags endpoint: Method=%s, RemoteAddr=%s ===", r.Method, r.RemoteAddr)
@@ -101,8 +122,7 @@ func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			continue
 		}
-		// Only keep the configured model
-		if modelName == s.config.Model {
+		if matchesModel(modelName, s.config.Model) {
 			filteredModels = append(filteredModels, model)
 		}
 	}
@@ -637,8 +657,7 @@ func (s *Server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		
-		// Filter: only keep the configured model
-		if modelName != s.config.Model {
+		if !matchesModel(modelName, s.config.Model) {
 			continue
 		}
 		
