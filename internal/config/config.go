@@ -14,6 +14,7 @@ type Config struct {
 	AppURL             string // Application URL for API access
 	OllamaPullDelaySec int    // Seconds to wait after Ollama is ready before first pull (for blob index to load, helps resume after restart)
 	BaseMode           bool   // Base mode: no specific model, show guide + version + model list
+	ThinkingEnabled    bool   // Default thinking mode for models that support it (Qwen3.5, DeepSeek, etc.)
 
 	// GGUF mode: download GGUF from Hugging Face and register via ollama create
 	HFEndpoint string // HF base URL, e.g. "https://huggingface.co"
@@ -43,6 +44,7 @@ func Load() *Config {
 		AppURL:             getEnv("APP_URL", ""),
 		OllamaPullDelaySec: getEnvInt("OLLAMA_PULL_DELAY_SECONDS", 30),
 		BaseMode:           model == "" && !ggufMode,
+		ThinkingEnabled:    getEnvBool("OLLAMA_THINKING", true),
 
 		HFEndpoint: getEnv("HF_ENDPOINT", "https://huggingface.co"),
 		HFRepo:     hfRepo,
@@ -109,4 +111,18 @@ func getEnvInt(key string, defaultValue int) int {
 		}
 	}
 	return defaultValue
+}
+
+// getEnvBool gets boolean environment variable, returns default value if not exists.
+// Accepts "true"/"1" as true and "false"/"0" as false (case-insensitive).
+func getEnvBool(key string, defaultValue bool) bool {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	b, err := strconv.ParseBool(value)
+	if err != nil {
+		return defaultValue
+	}
+	return b
 }

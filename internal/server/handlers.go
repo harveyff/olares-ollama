@@ -352,16 +352,22 @@ func (s *Server) handleInferenceRequest(w http.ResponseWriter, r *http.Request, 
 	// Replace model parameter
 	requestData["model"] = s.config.Model
 
-	// Pass through Ollama "think" (Qwen3.5/DeepSeek thinking mode). If client sent top-level "think", keep it.
-	// Else if client sent options.think or options.reasoning, copy to top-level "think" for Ollama (boolean).
+	// Resolve "think" for models that support thinking mode (Qwen3.5, DeepSeek, etc.).
+	// Priority: top-level "think" > options.think > options.reasoning > OLLAMA_THINKING env default.
 	if path == "/api/chat" || path == "/api/generate" {
 		if _, hasThink := requestData["think"]; !hasThink {
+			resolved := false
 			if options, ok := requestData["options"].(map[string]interface{}); ok {
 				if thinkVal, ok := options["think"]; ok {
 					requestData["think"] = toBool(thinkVal)
+					resolved = true
 				} else if reasoning, ok := options["reasoning"]; ok {
 					requestData["think"] = toBool(reasoning)
+					resolved = true
 				}
+			}
+			if !resolved {
+				requestData["think"] = s.config.ThinkingEnabled
 			}
 		}
 	}
@@ -794,7 +800,8 @@ func (s *Server) handleOpenAIInferenceRequest(w http.ResponseWriter, r *http.Req
 	if toolChoice, ok := openaiRequest["tool_choice"]; ok {
 		ollamaRequest["tool_choice"] = toolChoice
 	}
-	// Pass through "think" for Qwen3.5/DeepSeek: from top-level "think", or extra_body.think, or extra_body.reasoning
+	// Resolve "think" for thinking models.
+	// Priority: top-level "think" > extra_body.think > extra_body.reasoning > OLLAMA_THINKING env default.
 	if thinkVal, ok := openaiRequest["think"]; ok {
 		ollamaRequest["think"] = toBool(thinkVal)
 	} else if extra, ok := openaiRequest["extra_body"].(map[string]interface{}); ok {
@@ -802,7 +809,11 @@ func (s *Server) handleOpenAIInferenceRequest(w http.ResponseWriter, r *http.Req
 			ollamaRequest["think"] = toBool(v)
 		} else if v, ok := extra["reasoning"]; ok {
 			ollamaRequest["think"] = toBool(v)
+		} else {
+			ollamaRequest["think"] = s.config.ThinkingEnabled
 		}
+	} else {
+		ollamaRequest["think"] = s.config.ThinkingEnabled
 	}
 	
 	modifiedBody, err := json.Marshal(ollamaRequest)
@@ -1208,6 +1219,21 @@ func (s *Server) handleOpenAICompletions(w http.ResponseWriter, r *http.Request)
 	}
 	if stop, ok := openaiRequest["stop"]; ok {
 		ollamaRequest["stop"] = stop
+	}
+
+	// Resolve "think" for thinking models.
+	if thinkVal, ok := openaiRequest["think"]; ok {
+		ollamaRequest["think"] = toBool(thinkVal)
+	} else if extra, ok := openaiRequest["extra_body"].(map[string]interface{}); ok {
+		if v, ok := extra["think"]; ok {
+			ollamaRequest["think"] = toBool(v)
+		} else if v, ok := extra["reasoning"]; ok {
+			ollamaRequest["think"] = toBool(v)
+		} else {
+			ollamaRequest["think"] = s.config.ThinkingEnabled
+		}
+	} else {
+		ollamaRequest["think"] = s.config.ThinkingEnabled
 	}
 	
 	modifiedBody, err := json.Marshal(ollamaRequest)
