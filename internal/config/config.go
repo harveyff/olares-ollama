@@ -15,6 +15,7 @@ type Config struct {
 	OllamaPullDelaySec int    // Seconds to wait after Ollama is ready before first pull (for blob index to load, helps resume after restart)
 	BaseMode           bool   // Base mode: no specific model, show guide + version + model list
 	ThinkingEnabled    bool   // Default thinking mode for models that support it (Qwen3.5, DeepSeek, etc.)
+	ContextLength      int    // Default num_ctx to inject into requests (0 = don't inject, let model/Ollama decide)
 
 	// GGUF mode: download GGUF from Hugging Face and register via ollama create
 	HFEndpoint string // HF base URL, e.g. "https://huggingface.co"
@@ -45,6 +46,7 @@ func Load() *Config {
 		OllamaPullDelaySec: getEnvInt("OLLAMA_PULL_DELAY_SECONDS", 30),
 		BaseMode:           model == "" && !ggufMode,
 		ThinkingEnabled:    getEnvBool("OLLAMA_THINKING", true),
+		ContextLength:      getEnvInt("OLLAMA_CONTEXT_LENGTH", 0),
 
 		HFEndpoint: getEnv("HF_ENDPOINT", "https://huggingface.co"),
 		HFRepo:     hfRepo,

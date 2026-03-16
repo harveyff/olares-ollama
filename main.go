@@ -243,6 +243,17 @@ func ensureModelGGUF(client *ollama.Client, cfg *config.Config, progressManager 
 		}
 	}
 
+	// Apply OLLAMA_CONTEXT_LENGTH to num_ctx if not already set in GGUF_PARAMS.
+	if cfg.ContextLength > 0 {
+		if params == nil {
+			params = map[string]interface{}{}
+		}
+		if _, hasNumCtx := params["num_ctx"]; !hasNumCtx {
+			params["num_ctx"] = cfg.ContextLength
+			log.Printf("Setting num_ctx=%d from OLLAMA_CONTEXT_LENGTH", cfg.ContextLength)
+		}
+	}
+
 	tpl := cfg.ResolveTemplate()
 	if tpl != "" {
 		log.Printf("Using explicit template (name=%q, len=%d)", cfg.GGUFTemplateName, len(tpl))
