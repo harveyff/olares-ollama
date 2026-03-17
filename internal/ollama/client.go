@@ -580,9 +580,9 @@ type CreateResponse struct {
 //
 // When a Go template is provided, the model is first deleted (if it exists)
 // to clear any cached Jinja2 renderer from previous creation, then re-created
-// using "from": "@sha256:..." with the explicit Go template. This ensures
-// the template fully controls capabilities (tools, thinking) without
-// interference from the GGUF's embedded Jinja2 template.
+// using the files API with an explicit Go template field. This ensures the
+// template fully controls capabilities (tools, thinking) without interference
+// from the GGUF's embedded Jinja2 template.
 //
 //	files: {"filename.gguf": "sha256:abc..."}
 //	params: optional model parameters, e.g. {"num_ctx": 128000}
@@ -594,29 +594,21 @@ func (c *Client) CreateModelFromGGUF(modelName string, files map[string]string, 
 		// Delete old model first to clear any cached Jinja2 renderer.
 		c.deleteModel(modelName)
 
-		var digest string
-		for _, d := range files {
-			digest = d
-			break
-		}
-		// Use "from" with blob digest + explicit template (current API format).
-		createReq := map[string]interface{}{
-			"model":    modelName,
-			"from":     "@" + digest,
-			"template": template,
-		}
-		if params != nil {
-			createReq["parameters"] = params
-		}
-		if system != "" {
-			createReq["system"] = system
+		// Use files API with explicit template; the delete ensures Ollama
+		// won't reuse a stale Jinja2 renderer from the GGUF metadata.
+		createReq := CreateRequest{
+			Model:      modelName,
+			Files:      files,
+			Parameters: params,
+			Template:   template,
+			System:     system,
 		}
 		jsonData, err = json.Marshal(createReq)
 		if err != nil {
 			return err
 		}
-		log.Printf("Creating model %s via from+template (digest: %s, params: %v, template len: %d)...",
-			modelName, digest[:20], params, len(template))
+		log.Printf("Creating model %s via files+template (files: %v, params: %v, template len: %d)...",
+			modelName, files, params, len(template))
 	} else {
 		// No template: use files API; let Ollama auto-detect from GGUF.
 		createReq := CreateRequest{
