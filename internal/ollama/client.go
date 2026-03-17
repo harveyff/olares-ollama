@@ -578,24 +578,62 @@ type CreateResponse struct {
 // CreateModelFromGGUF registers a GGUF blob as a named model.
 // The blob must already have been pushed via PushBlob.
 //
+// When a Go template is provided, the model is first deleted (if it exists)
+// to clear any cached Jinja2 renderer from previous creation, then re-created
+// using "from": "@sha256:..." with the explicit Go template. This ensures
+// the template fully controls capabilities (tools, thinking) without
+// interference from the GGUF's embedded Jinja2 template.
+//
 //	files: {"filename.gguf": "sha256:abc..."}
 //	params: optional model parameters, e.g. {"num_ctx": 128000}
 func (c *Client) CreateModelFromGGUF(modelName string, files map[string]string, params map[string]interface{}, template, system string, progressUpdater ProgressUpdater) error {
-	createReq := CreateRequest{
-		Model:      modelName,
-		Files:      files,
-		Parameters: params,
-		Template:   template,
-		System:     system,
-	}
-	jsonData, err := json.Marshal(createReq)
-	if err != nil {
-		return err
+	var jsonData []byte
+	var err error
+
+	if template != "" {
+		// Delete old model first to clear any cached Jinja2 renderer.
+		c.deleteModel(modelName)
+
+		var digest string
+		for _, d := range files {
+			digest = d
+			break
+		}
+		// Use "from" with blob digest + explicit template (current API format).
+		createReq := map[string]interface{}{
+			"model":    modelName,
+			"from":     "@" + digest,
+			"template": template,
+		}
+		if params != nil {
+			createReq["parameters"] = params
+		}
+		if system != "" {
+			createReq["system"] = system
+		}
+		jsonData, err = json.Marshal(createReq)
+		if err != nil {
+			return err
+		}
+		log.Printf("Creating model %s via from+template (digest: %s, params: %v, template len: %d)...",
+			modelName, digest[:20], params, len(template))
+	} else {
+		// No template: use files API; let Ollama auto-detect from GGUF.
+		createReq := CreateRequest{
+			Model:      modelName,
+			Files:      files,
+			Parameters: params,
+			System:     system,
+		}
+		jsonData, err = json.Marshal(createReq)
+		if err != nil {
+			return err
+		}
+		log.Printf("Creating model %s via /api/create files (files: %v, params: %v)...",
+			modelName, files, params)
 	}
 
 	progressUpdater.UpdateProgress("creating", 0, 0, modelName)
-	log.Printf("Creating model %s via /api/create (files: %v, params: %v, hasTemplate: %v)...",
-		modelName, files, params, template != "")
 
 	resp, err := c.downloadClient.Post(
 		c.baseURL+"/api/create",
@@ -634,6 +672,28 @@ func (c *Client) CreateModelFromGGUF(modelName string, files map[string]string, 
 
 	progressUpdater.UpdateProgress("error", 0, 0, modelName)
 	return fmt.Errorf("create stream ended without success for model %s", modelName)
+}
+
+// deleteModel sends DELETE /api/delete to remove a model (best-effort).
+func (c *Client) deleteModel(modelName string) {
+	reqBody, _ := json.Marshal(map[string]string{"model": modelName})
+	req, err := http.NewRequest("DELETE", c.baseURL+"/api/delete", bytes.NewBuffer(reqBody))
+	if err != nil {
+		log.Printf("Warning: failed to build delete request for %s: %v", modelName, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.downloadClient.Do(req)
+	if err != nil {
+		log.Printf("Warning: failed to delete model %s: %v", modelName, err)
+		return
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		log.Printf("Deleted old model %s before re-creation", modelName)
+	} else {
+		log.Printf("Delete model %s returned %d (may not exist yet, continuing)", modelName, resp.StatusCode)
+	}
 }
 
 // ProxyRequest 代理请求到Ollama
