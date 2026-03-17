@@ -352,6 +352,27 @@ func (s *Server) handleInferenceRequest(w http.ResponseWriter, r *http.Request, 
 	// Replace model parameter
 	requestData["model"] = s.config.Model
 
+	// Inject default options (repeat_penalty, repeat_last_n) when configured and client didn't specify.
+	if path == "/api/chat" || path == "/api/generate" {
+		if s.config.RepeatPenalty > 0 || s.config.RepeatLastN > 0 {
+			options, _ := requestData["options"].(map[string]interface{})
+			if options == nil {
+				options = map[string]interface{}{}
+				requestData["options"] = options
+			}
+			if s.config.RepeatPenalty > 0 {
+				if _, has := options["repeat_penalty"]; !has {
+					options["repeat_penalty"] = s.config.RepeatPenalty
+				}
+			}
+			if s.config.RepeatLastN > 0 {
+				if _, has := options["repeat_last_n"]; !has {
+					options["repeat_last_n"] = s.config.RepeatLastN
+				}
+			}
+		}
+	}
+
 	// Resolve "think" for models that support thinking mode (Qwen3.5, DeepSeek, etc.).
 	// When OLLAMA_THINKING=false: force disable, ignore client value.
 	// When OLLAMA_THINKING=true (default): client value > options.think > options.reasoning > true.
@@ -796,6 +817,18 @@ func (s *Server) handleOpenAIInferenceRequest(w http.ResponseWriter, r *http.Req
 		"messages": ollamaMessages,
 		"stream":   stream,
 	}
+	// Inject default options (repeat_penalty, repeat_last_n) when configured.
+	if s.config.RepeatPenalty > 0 || s.config.RepeatLastN > 0 {
+		options := map[string]interface{}{}
+		if s.config.RepeatPenalty > 0 {
+			options["repeat_penalty"] = s.config.RepeatPenalty
+		}
+		if s.config.RepeatLastN > 0 {
+			options["repeat_last_n"] = s.config.RepeatLastN
+		}
+		ollamaRequest["options"] = options
+	}
+
 	// Pass through tools and tool_choice for function/tool calling
 	if tools, ok := openaiRequest["tools"]; ok {
 		ollamaRequest["tools"] = tools
@@ -1226,6 +1259,18 @@ func (s *Server) handleOpenAICompletions(w http.ResponseWriter, r *http.Request)
 	}
 	if stop, ok := openaiRequest["stop"]; ok {
 		ollamaRequest["stop"] = stop
+	}
+
+	// Inject default options (repeat_penalty, repeat_last_n) when configured.
+	if s.config.RepeatPenalty > 0 || s.config.RepeatLastN > 0 {
+		options := map[string]interface{}{}
+		if s.config.RepeatPenalty > 0 {
+			options["repeat_penalty"] = s.config.RepeatPenalty
+		}
+		if s.config.RepeatLastN > 0 {
+			options["repeat_last_n"] = s.config.RepeatLastN
+		}
+		ollamaRequest["options"] = options
 	}
 
 	// Resolve "think" for thinking models.

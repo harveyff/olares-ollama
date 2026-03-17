@@ -14,8 +14,10 @@ type Config struct {
 	AppURL             string // Application URL for API access
 	OllamaPullDelaySec int    // Seconds to wait after Ollama is ready before first pull (for blob index to load, helps resume after restart)
 	BaseMode           bool   // Base mode: no specific model, show guide + version + model list
-	ThinkingEnabled    bool   // Default thinking mode for models that support it (Qwen3.5, DeepSeek, etc.)
+	ThinkingEnabled    bool    // Default thinking mode for models that support it (Qwen3.5, DeepSeek, etc.)
 	ContextLength      int    // Default num_ctx to inject into requests (0 = don't inject, let model/Ollama decide)
+	RepeatPenalty      float64 // Default repeat_penalty injected into requests (0 = don't inject)
+	RepeatLastN        int     // Default repeat_last_n injected into requests (0 = don't inject)
 
 	// GGUF mode: download GGUF from Hugging Face and register via ollama create
 	HFEndpoint string // HF base URL, e.g. "https://huggingface.co"
@@ -47,6 +49,8 @@ func Load() *Config {
 		BaseMode:           model == "" && !ggufMode,
 		ThinkingEnabled:    getEnvBool("OLLAMA_THINKING", true),
 		ContextLength:      getEnvInt("OLLAMA_CONTEXT_LENGTH", 0),
+		RepeatPenalty:      getEnvFloat("OLLAMA_REPEAT_PENALTY", 0),
+		RepeatLastN:        getEnvInt("OLLAMA_REPEAT_LAST_N", 0),
 
 		HFEndpoint: getEnv("HF_ENDPOINT", "https://huggingface.co"),
 		HFRepo:     hfRepo,
@@ -110,6 +114,16 @@ func getEnvInt(key string, defaultValue int) int {
 	if value := os.Getenv(key); value != "" {
 		if intValue, err := strconv.Atoi(value); err == nil {
 			return intValue
+		}
+	}
+	return defaultValue
+}
+
+// getEnvFloat gets float64 environment variable, returns default value if not exists
+func getEnvFloat(key string, defaultValue float64) float64 {
+	if value := os.Getenv(key); value != "" {
+		if f, err := strconv.ParseFloat(value, 64); err == nil {
+			return f
 		}
 	}
 	return defaultValue
