@@ -580,10 +580,10 @@ type CreateResponse struct {
 // The blob must already have been pushed via PushBlob.
 //
 // When a Go template is provided, the model is first deleted (if it exists)
-// to clear any cached state, then re-created using "from" with the GGUF file
-// path plus an explicit Go template. Ollama reads the GGUF directly and applies
-// the template override, bypassing Jinja2 auto-detection entirely. This makes
-// the model behave identically to official Ollama models.
+// to clear any cached state, then re-created using a Modelfile with
+// FROM <ggufPath>. This is the most reliable way to set an explicit Go
+// template, bypassing Jinja2 auto-detection entirely and producing the
+// same result as official Ollama models.
 //
 // When no template is provided, the files API is used and Ollama auto-detects
 // the template from the GGUF metadata.
@@ -599,21 +599,18 @@ func (c *Client) CreateModelFromGGUF(modelName, ggufPath string, files map[strin
 		// Delete old model first to clear any cached Jinja2 renderer.
 		c.deleteModel(modelName)
 
-		// Use "from" with file path + explicit template. Ollama reads the GGUF
-		// directly and applies our Go template, completely bypassing Jinja2
-		// auto-detection. This produces the same result as official Ollama models.
-		createReq := CreateRequest{
-			Model:      modelName,
-			From:       ggufPath,
-			Parameters: params,
-			Template:   template,
-			System:     system,
+		// Build a Modelfile string. FROM with a file path is the most reliable
+		// way to create a model with an explicit Go template in Ollama.
+		modelfile := buildModelfile(ggufPath, template, system, params)
+		createReq := map[string]string{
+			"model":     modelName,
+			"modelfile": modelfile,
 		}
 		jsonData, err = json.Marshal(createReq)
 		if err != nil {
 			return err
 		}
-		log.Printf("Creating model %s via from+template (from: %s, params: %v, template len: %d)...",
+		log.Printf("Creating model %s via Modelfile (from: %s, params: %v, template len: %d)...",
 			modelName, ggufPath, params, len(template))
 	} else {
 		// No template: use files API; let Ollama auto-detect from GGUF.
@@ -670,6 +667,30 @@ func (c *Client) CreateModelFromGGUF(modelName, ggufPath string, files map[strin
 
 	progressUpdater.UpdateProgress("error", 0, 0, modelName)
 	return fmt.Errorf("create stream ended without success for model %s", modelName)
+}
+
+// buildModelfile constructs an Ollama Modelfile string from components.
+// Using FROM with a file path + TEMPLATE is the most reliable method to
+// create a model with a custom Go template, equivalent to writing a Modelfile
+// manually and running `ollama create`.
+func buildModelfile(ggufPath, template, system string, params map[string]interface{}) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "FROM %s\n", ggufPath)
+	fmt.Fprintf(&b, "TEMPLATE \"\"\"\n%s\"\"\"\n", template)
+	if system != "" {
+		fmt.Fprintf(&b, "SYSTEM \"\"\"\n%s\"\"\"\n", system)
+	}
+	for key, val := range params {
+		switch v := val.(type) {
+		case []interface{}:
+			for _, item := range v {
+				fmt.Fprintf(&b, "PARAMETER %s \"%v\"\n", key, item)
+			}
+		default:
+			fmt.Fprintf(&b, "PARAMETER %s %v\n", key, val)
+		}
+	}
+	return b.String()
 }
 
 // deleteModel sends DELETE /api/delete to remove a model (best-effort).
