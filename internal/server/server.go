@@ -55,6 +55,7 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/api/chat", s.handleChat)
 	s.mux.HandleFunc("/api/embeddings", s.handleEmbeddings)
 	s.mux.HandleFunc("/api/embed", s.handleEmbeddings)  // OpenWebUI uses /api/embed
+	s.mux.HandleFunc("/api/show", s.handleProxy)
 	s.mux.HandleFunc("/api/version", s.handleProxy)
 	s.mux.HandleFunc("/api/ps", s.handleProxy)
 	s.mux.HandleFunc("/api/stop", s.handleProxy)

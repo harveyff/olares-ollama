@@ -564,6 +564,7 @@ func (c *Client) PushBlob(digest, filePath string, progressUpdater ProgressUpdat
 // CreateRequest represents the new-format ollama create request (Ollama >=0.5).
 type CreateRequest struct {
 	Model      string                 `json:"model"`
+	From       string                 `json:"from,omitempty"`
 	Files      map[string]string      `json:"files,omitempty"`
 	Parameters map[string]interface{} `json:"parameters,omitempty"`
 	Template   string                 `json:"template,omitempty"`
@@ -579,14 +580,18 @@ type CreateResponse struct {
 // The blob must already have been pushed via PushBlob.
 //
 // When a Go template is provided, the model is first deleted (if it exists)
-// to clear any cached Jinja2 renderer from previous creation, then re-created
-// using the files API with an explicit Go template field. This ensures the
-// template fully controls capabilities (tools, thinking) without interference
-// from the GGUF's embedded Jinja2 template.
+// to clear any cached state, then re-created using "from" with the GGUF file
+// path plus an explicit Go template. Ollama reads the GGUF directly and applies
+// the template override, bypassing Jinja2 auto-detection entirely. This makes
+// the model behave identically to official Ollama models.
 //
-//	files: {"filename.gguf": "sha256:abc..."}
+// When no template is provided, the files API is used and Ollama auto-detects
+// the template from the GGUF metadata.
+//
+//	ggufPath: absolute path to the GGUF file (accessible by Ollama, e.g. /models/xxx.gguf)
+//	files: {"filename.gguf": "sha256:abc..."} — used only when no template is set
 //	params: optional model parameters, e.g. {"num_ctx": 128000}
-func (c *Client) CreateModelFromGGUF(modelName string, files map[string]string, params map[string]interface{}, template, system string, progressUpdater ProgressUpdater) error {
+func (c *Client) CreateModelFromGGUF(modelName, ggufPath string, files map[string]string, params map[string]interface{}, template, system string, progressUpdater ProgressUpdater) error {
 	var jsonData []byte
 	var err error
 
@@ -594,11 +599,12 @@ func (c *Client) CreateModelFromGGUF(modelName string, files map[string]string, 
 		// Delete old model first to clear any cached Jinja2 renderer.
 		c.deleteModel(modelName)
 
-		// Use files API with explicit template; the delete ensures Ollama
-		// won't reuse a stale Jinja2 renderer from the GGUF metadata.
+		// Use "from" with file path + explicit template. Ollama reads the GGUF
+		// directly and applies our Go template, completely bypassing Jinja2
+		// auto-detection. This produces the same result as official Ollama models.
 		createReq := CreateRequest{
 			Model:      modelName,
-			Files:      files,
+			From:       ggufPath,
 			Parameters: params,
 			Template:   template,
 			System:     system,
@@ -607,8 +613,8 @@ func (c *Client) CreateModelFromGGUF(modelName string, files map[string]string, 
 		if err != nil {
 			return err
 		}
-		log.Printf("Creating model %s via files+template (files: %v, params: %v, template len: %d)...",
-			modelName, files, params, len(template))
+		log.Printf("Creating model %s via from+template (from: %s, params: %v, template len: %d)...",
+			modelName, ggufPath, params, len(template))
 	} else {
 		// No template: use files API; let Ollama auto-detect from GGUF.
 		createReq := CreateRequest{

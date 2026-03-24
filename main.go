@@ -259,7 +259,7 @@ func ensureModelGGUF(client *ollama.Client, cfg *config.Config, progressManager 
 		log.Printf("Using explicit template (name=%q, len=%d)", cfg.GGUFTemplateName, len(tpl))
 	}
 
-	if err := client.CreateModelFromGGUF(modelName, files, params, tpl, cfg.GGUFSystem, progressManager); err != nil {
+	if err := client.CreateModelFromGGUF(modelName, dl.DestPath(), files, params, tpl, cfg.GGUFSystem, progressManager); err != nil {
 		return fmt.Errorf("ollama create failed: %w", err)
 	}
 
