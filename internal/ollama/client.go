@@ -579,56 +579,81 @@ type CreateResponse struct {
 // CreateModelFromGGUF registers a GGUF blob as a named model.
 // The blob must already have been pushed via PushBlob.
 //
-// When a Go template is provided, the model is first deleted (if it exists)
-// to clear any cached state, then re-created using a Modelfile with
-// FROM <ggufPath>. This is the most reliable way to set an explicit Go
-// template, bypassing Jinja2 auto-detection entirely and producing the
-// same result as official Ollama models.
+// When a Go template is provided, a two-step creation is used:
+//  1. Create a temporary base model from the GGUF via the files API
+//     (Ollama auto-detects the template from GGUF metadata).
+//  2. Create the final model from the base via "from" + explicit Go template.
+//     This reliably overrides the Jinja2 template and produces the same
+//     result as official Ollama models.
 //
-// When no template is provided, the files API is used and Ollama auto-detects
-// the template from the GGUF metadata.
+// When no template is provided, the files API is used directly.
 //
-//	ggufPath: absolute path to the GGUF file (accessible by Ollama, e.g. /models/xxx.gguf)
-//	files: {"filename.gguf": "sha256:abc..."} — used only when no template is set
+//	ggufPath: unused (kept for API compat)
+//	files: {"filename.gguf": "sha256:abc..."}
 //	params: optional model parameters, e.g. {"num_ctx": 128000}
 func (c *Client) CreateModelFromGGUF(modelName, ggufPath string, files map[string]string, params map[string]interface{}, template, system string, progressUpdater ProgressUpdater) error {
-	var jsonData []byte
-	var err error
-
 	if template != "" {
-		// Delete old model first to clear any cached Jinja2 renderer.
-		c.deleteModel(modelName)
+		return c.createGGUFWithTemplate(modelName, files, params, template, system, progressUpdater)
+	}
+	// No template: single-step creation via files API.
+	createReq := CreateRequest{
+		Model:      modelName,
+		Files:      files,
+		Parameters: params,
+		System:     system,
+	}
+	log.Printf("Creating model %s via files API (files: %v, params: %v)...",
+		modelName, files, params)
+	return c.doCreate(createReq, modelName, progressUpdater)
+}
 
-		// Build a Modelfile string. FROM with a file path is the most reliable
-		// way to create a model with an explicit Go template in Ollama.
-		modelfile := buildModelfile(ggufPath, template, system, params)
-		createReq := map[string]string{
-			"model":     modelName,
-			"modelfile": modelfile,
-		}
-		jsonData, err = json.Marshal(createReq)
-		if err != nil {
-			return err
-		}
-		log.Printf("Creating model %s via Modelfile (from: %s, params: %v, template len: %d)...",
-			modelName, ggufPath, params, len(template))
-	} else {
-		// No template: use files API; let Ollama auto-detect from GGUF.
-		createReq := CreateRequest{
-			Model:      modelName,
-			Files:      files,
-			Parameters: params,
-			System:     system,
-		}
-		jsonData, err = json.Marshal(createReq)
-		if err != nil {
-			return err
-		}
-		log.Printf("Creating model %s via /api/create files (files: %v, params: %v)...",
-			modelName, files, params)
+// createGGUFWithTemplate implements the two-step creation strategy:
+// Step 1: files API → base model (auto-detected template)
+// Step 2: from base + explicit template → final model
+func (c *Client) createGGUFWithTemplate(modelName string, files map[string]string, params map[string]interface{}, template, system string, progressUpdater ProgressUpdater) error {
+	baseModel := modelName + "-base"
+
+	// Step 1: Create base model from GGUF (no template override).
+	log.Printf("Step 1/2: Creating base model %s from GGUF files...", baseModel)
+	c.deleteModel(baseModel)
+	baseReq := CreateRequest{
+		Model: baseModel,
+		Files: files,
+	}
+	if err := c.doCreate(baseReq, modelName, progressUpdater); err != nil {
+		return fmt.Errorf("create base model: %w", err)
+	}
+	log.Printf("Base model %s created", baseModel)
+
+	// Step 2: Create final model from base with explicit Go template.
+	log.Printf("Step 2/2: Creating final model %s from base with explicit template (len=%d)...", modelName, len(template))
+	c.deleteModel(modelName)
+	finalReq := CreateRequest{
+		Model:      modelName,
+		From:       baseModel,
+		Template:   template,
+		Parameters: params,
+		System:     system,
+	}
+	if err := c.doCreate(finalReq, modelName, progressUpdater); err != nil {
+		c.deleteModel(baseModel)
+		return fmt.Errorf("create final model: %w", err)
 	}
 
-	progressUpdater.UpdateProgress("creating", 0, 0, modelName)
+	// Clean up the temporary base model.
+	c.deleteModel(baseModel)
+	log.Printf("Model %s created successfully with explicit template", modelName)
+	return nil
+}
+
+// doCreate sends a POST /api/create request and streams the response until
+// "success" or an error occurs.
+func (c *Client) doCreate(req interface{}, progressModel string, progressUpdater ProgressUpdater) error {
+	jsonData, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	progressUpdater.UpdateProgress("creating", 0, 0, progressModel)
 
 	resp, err := c.downloadClient.Post(
 		c.baseURL+"/api/create",
@@ -636,14 +661,14 @@ func (c *Client) CreateModelFromGGUF(modelName, ggufPath string, files map[strin
 		bytes.NewBuffer(jsonData),
 	)
 	if err != nil {
-		progressUpdater.UpdateProgress("error", 0, 0, modelName)
+		progressUpdater.UpdateProgress("error", 0, 0, progressModel)
 		return fmt.Errorf("create request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		progressUpdater.UpdateProgress("error", 0, 0, modelName)
+		progressUpdater.UpdateProgress("error", 0, 0, progressModel)
 		return fmt.Errorf("create model failed (HTTP %s): %s", resp.Status, string(body))
 	}
 
@@ -653,44 +678,19 @@ func (c *Client) CreateModelFromGGUF(modelName, ggufPath string, files map[strin
 		if err := decoder.Decode(&cr); err == io.EOF {
 			break
 		} else if err != nil {
-			progressUpdater.UpdateProgress("error", 0, 0, modelName)
+			progressUpdater.UpdateProgress("error", 0, 0, progressModel)
 			return fmt.Errorf("decode create response: %w", err)
 		}
 		log.Printf("Create status: %s", cr.Status)
-		progressUpdater.UpdateProgress("creating", 0, 0, modelName)
+		progressUpdater.UpdateProgress("creating", 0, 0, progressModel)
 		if cr.Status == "success" {
-			log.Printf("Model %s created successfully", modelName)
-			progressUpdater.UpdateProgress("completed", 0, 0, modelName)
+			progressUpdater.UpdateProgress("completed", 0, 0, progressModel)
 			return nil
 		}
 	}
 
-	progressUpdater.UpdateProgress("error", 0, 0, modelName)
-	return fmt.Errorf("create stream ended without success for model %s", modelName)
-}
-
-// buildModelfile constructs an Ollama Modelfile string from components.
-// Using FROM with a file path + TEMPLATE is the most reliable method to
-// create a model with a custom Go template, equivalent to writing a Modelfile
-// manually and running `ollama create`.
-func buildModelfile(ggufPath, template, system string, params map[string]interface{}) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "FROM %s\n", ggufPath)
-	fmt.Fprintf(&b, "TEMPLATE \"\"\"\n%s\"\"\"\n", template)
-	if system != "" {
-		fmt.Fprintf(&b, "SYSTEM \"\"\"\n%s\"\"\"\n", system)
-	}
-	for key, val := range params {
-		switch v := val.(type) {
-		case []interface{}:
-			for _, item := range v {
-				fmt.Fprintf(&b, "PARAMETER %s \"%v\"\n", key, item)
-			}
-		default:
-			fmt.Fprintf(&b, "PARAMETER %s %v\n", key, val)
-		}
-	}
-	return b.String()
+	progressUpdater.UpdateProgress("error", 0, 0, progressModel)
+	return fmt.Errorf("create stream ended without success")
 }
 
 // deleteModel sends DELETE /api/delete to remove a model (best-effort).
