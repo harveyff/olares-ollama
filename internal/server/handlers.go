@@ -1541,37 +1541,22 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 	requestData["model"] = s.config.Model
 	log.Printf(">>> [handleSingleEmbedding] Model replacement: %v -> %s <<<", originalModel, s.config.Model)
 	
-	// Convert "input" to "prompt" for Ollama if needed
+	// Normalize input for Ollama /api/embed (new endpoint).
+	// /api/embed accepts {"model": "...", "input": "..." or ["..."]}
 	if input, ok := requestData["input"]; ok {
-		log.Printf(">>> [handleSingleEmbedding] Converting input to prompt, input type: %T <<<", input)
-		// Ollama uses "prompt" instead of "input", and it must be a string
-		var promptStr string
-		if inputArray, ok := input.([]interface{}); ok && len(inputArray) > 0 {
-			log.Printf(">>> [handleSingleEmbedding] Input is array, length: %d <<<", len(inputArray))
-			// If input is an array, take the first element
+		log.Printf(">>> [handleSingleEmbedding] input field present, type: %T <<<", input)
+		// If input is an array with one element, unwrap to string for single embedding
+		if inputArray, ok := input.([]interface{}); ok && len(inputArray) == 1 {
 			if firstItem, ok := inputArray[0].(string); ok {
-				promptStr = firstItem
-				log.Printf(">>> [handleSingleEmbedding] Extracted prompt from array[0], length: %d chars <<<", len(promptStr))
-			} else {
-				log.Printf("!!! [handleSingleEmbedding] Invalid input array element type: %T, value: %v !!!", inputArray[0], inputArray[0])
-				http.Error(w, "Invalid input format", http.StatusBadRequest)
-				return
+				requestData["input"] = firstItem
+				log.Printf(">>> [handleSingleEmbedding] Unwrapped single-element array to string, length: %d chars <<<", len(firstItem))
 			}
-		} else if inputStr, ok := input.(string); ok {
-			// If input is already a string, use it directly
-			promptStr = inputStr
-			log.Printf(">>> [handleSingleEmbedding] Input is string, length: %d chars <<<", len(promptStr))
-		} else {
-			log.Printf("!!! [handleSingleEmbedding] Invalid input type: %T, value: %v !!!", input, input)
-			http.Error(w, "Invalid input format", http.StatusBadRequest)
-			return
 		}
-		requestData["prompt"] = promptStr
-		// Remove "input" field as Ollama doesn't use it
-		delete(requestData, "input")
-		log.Printf(">>> [handleSingleEmbedding] Converted input to prompt, removed input field <<<")
-	} else {
-		log.Printf(">>> [handleSingleEmbedding] No input field found, using existing prompt field <<<")
+	} else if prompt, ok := requestData["prompt"]; ok {
+		// Legacy Ollama format: convert "prompt" to "input" for /api/embed
+		requestData["input"] = prompt
+		delete(requestData, "prompt")
+		log.Printf(">>> [handleSingleEmbedding] Converted prompt to input for /api/embed <<<")
 	}
 	
 	// Re-serialize
@@ -1601,10 +1586,10 @@ func (s *Server) handleSingleEmbedding(w http.ResponseWriter, r *http.Request, b
 	log.Printf(">>> Proxying embeddings request to Ollama (model: %s) <<<", s.config.Model)
 	
 	// Proxy to Ollama
-	log.Printf(">>> [handleSingleEmbedding] Sending request to Ollama /api/embeddings, body size: %d bytes <<<", len(modifiedBody))
+	log.Printf(">>> [handleSingleEmbedding] Sending request to Ollama /api/embed, body size: %d bytes <<<", len(modifiedBody))
 	resp, err := s.ollamaClient.ProxyRequest(
 		"POST",
-		"/api/embeddings",
+		"/api/embed",
 		bytes.NewReader(modifiedBody),
 		headers,
 	)
@@ -1905,11 +1890,10 @@ func (s *Server) handleBatchEmbeddings(w http.ResponseWriter, r *http.Request, i
 		for k, v := range requestData {
 			singleRequest[k] = v
 		}
-		singleRequest["input"] = input
 		singleRequest["model"] = s.config.Model
-		
-		// Convert to Ollama format
-		singleRequest["prompt"] = input
+		// Use "input" for Ollama /api/embed (new endpoint)
+		singleRequest["input"] = input
+		delete(singleRequest, "prompt")
 		
 		modifiedBody, err := json.Marshal(singleRequest)
 		if err != nil {
@@ -1927,11 +1911,11 @@ func (s *Server) handleBatchEmbeddings(w http.ResponseWriter, r *http.Request, i
 		headers["Content-Type"] = "application/json"
 		
 		// Proxy to Ollama
-		log.Printf(">>> [handleBatchEmbeddings] Sending request %d/%d to Ollama /api/embeddings, body size: %d bytes <<<", 
+		log.Printf(">>> [handleBatchEmbeddings] Sending request %d/%d to Ollama /api/embed, body size: %d bytes <<<", 
 			idx+1, len(inputs), len(modifiedBody))
 		resp, err := s.ollamaClient.ProxyRequest(
 			"POST",
-			"/api/embeddings",
+			"/api/embed",
 			bytes.NewReader(modifiedBody),
 			headers,
 		)
@@ -2097,7 +2081,12 @@ func (s *Server) handleOllamaEmbedding(w http.ResponseWriter, r *http.Request, b
 	// Replace model parameter
 	requestData["model"] = s.config.Model
 	
-	// Re-serialize (keep "prompt" as is for Ollama)
+	// Convert "prompt" to "input" for /api/embed (new endpoint)
+	if prompt, ok := requestData["prompt"]; ok {
+		requestData["input"] = prompt
+		delete(requestData, "prompt")
+	}
+	
 	modifiedBody, err := json.Marshal(requestData)
 	if err != nil {
 		log.Printf("Failed to marshal Ollama embeddings request: %v", err)
@@ -2121,12 +2110,12 @@ func (s *Server) handleOllamaEmbedding(w http.ResponseWriter, r *http.Request, b
 	}
 	headers["Content-Type"] = "application/json"
 	
-	log.Printf(">>> Proxying Ollama format embeddings request to Ollama (model: %s) <<<", s.config.Model)
+	log.Printf(">>> Proxying Ollama format embeddings request to Ollama /api/embed (model: %s) <<<", s.config.Model)
 	
-	// Proxy to Ollama
+	// Proxy to Ollama (use new /api/embed endpoint)
 	resp, err := s.ollamaClient.ProxyRequest(
 		"POST",
-		"/api/embeddings",
+		"/api/embed",
 		bytes.NewReader(modifiedBody),
 		headers,
 	)
