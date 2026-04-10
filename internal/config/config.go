@@ -20,10 +20,11 @@ type Config struct {
 	RepeatLastN        int     // Default repeat_last_n injected into requests (0 = don't inject)
 
 	// GGUF mode: download GGUF from Hugging Face and register via ollama create
-	HFEndpoint string // HF base URL, e.g. "https://huggingface.co"
-	HFRepo     string // HF repo, e.g. "unsloth/Qwen3.5-35B-A3B-GGUF"
-	HFFile     string // GGUF filename, e.g. "Qwen3.5-35B-A3B-UD-Q4_K_L.gguf"
-	HFToken    string // Optional HF auth token
+	HFEndpoint    string // HF base URL, e.g. "https://huggingface.co"
+	HFRepo        string // HF repo, e.g. "unsloth/Qwen3.5-35B-A3B-GGUF"
+	HFFile        string // GGUF filename, e.g. "Qwen3.5-35B-A3B-UD-Q4_K_L.gguf"
+	HFMMProjFile  string // Optional vision projector filename, e.g. "mmproj-BF16.gguf"
+	HFToken       string // Optional HF auth token
 	GGUFDir          string // Directory to save GGUF, default "/models"
 	GGUFParams       string // JSON dict of model parameters, e.g. {"num_ctx":128000}
 	GGUFTemplateName string // Named template: "chatml", "llama3", etc. Resolved to Go template in code
@@ -52,10 +53,11 @@ func Load() *Config {
 		RepeatPenalty:      getEnvFloat("OLLAMA_REPEAT_PENALTY", 0),
 		RepeatLastN:        getEnvInt("OLLAMA_REPEAT_LAST_N", 0),
 
-		HFEndpoint: getEnv("HF_ENDPOINT", "https://huggingface.co"),
-		HFRepo:     hfRepo,
-		HFFile:     hfFile,
-		HFToken:    getEnv("HF_TOKEN", ""),
+		HFEndpoint:   getEnv("HF_ENDPOINT", "https://huggingface.co"),
+		HFRepo:       hfRepo,
+		HFFile:       hfFile,
+		HFMMProjFile: getEnv("HF_MMPROJ_FILE", ""),
+		HFToken:      getEnv("HF_TOKEN", ""),
 		GGUFDir:          getEnv("GGUF_DIR", "/models"),
 		GGUFParams:       getEnv("GGUF_PARAMS", ""),
 		GGUFTemplateName: getEnv("GGUF_TEMPLATE_NAME", ""),

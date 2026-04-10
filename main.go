@@ -236,6 +236,42 @@ func ensureModelGGUF(client *ollama.Client, cfg *config.Config, progressManager 
 		cfg.HFFile: digest,
 	}
 
+	// Download mmproj (vision projector) if configured
+	if cfg.HFMMProjFile != "" {
+		mmDl := huggingface.New(cfg.HFEndpoint, cfg.HFRepo, cfg.HFMMProjFile, cfg.HFToken, cfg.GGUFDir)
+		if !mmDl.AlreadyDone() {
+			log.Printf("Downloading mmproj: %s/%s -> %s", cfg.HFRepo, cfg.HFMMProjFile, mmDl.DestPath())
+			if err := mmDl.Download(ctx, modelName, progressManager); err != nil {
+				return fmt.Errorf("mmproj download failed: %w", err)
+			}
+		} else {
+			log.Printf("mmproj file already downloaded: %s", mmDl.DestPath())
+		}
+
+		progressManager.UpdateProgress("hashing", 0, 0, modelName)
+		mmDigest, err := huggingface.ComputeSHA256(mmDl.DestPath())
+		if err != nil {
+			return fmt.Errorf("compute mmproj SHA256: %w", err)
+		}
+		log.Printf("mmproj digest: %s", mmDigest)
+
+		mmBlobExists, err := client.BlobExists(mmDigest)
+		if err != nil {
+			log.Printf("Warning: mmproj blob existence check failed: %v, will try pushing anyway", err)
+			mmBlobExists = false
+		}
+		if mmBlobExists {
+			log.Printf("mmproj blob %s already exists, skipping push", mmDigest)
+		} else {
+			if err := client.PushBlob(mmDigest, mmDl.DestPath(), progressManager, modelName); err != nil {
+				return fmt.Errorf("push mmproj blob: %w", err)
+			}
+		}
+
+		files[cfg.HFMMProjFile] = mmDigest
+	}
+
+
 	var params map[string]interface{}
 	if cfg.GGUFParams != "" {
 		if err := json.Unmarshal([]byte(cfg.GGUFParams), &params); err != nil {

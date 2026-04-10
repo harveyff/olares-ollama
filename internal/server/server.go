@@ -69,7 +69,7 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/v1/completions", s.handleOpenAICompletions)  // OpenAI text completions
 	s.mux.HandleFunc("/v1/models", s.handleOpenAIModels)
 	s.mux.HandleFunc("/v1/embeddings", s.handleEmbeddings)  // OpenAI embeddings
-	s.mux.HandleFunc("/v1/responses", s.handleProxy)  // Proxy /v1/responses to Ollama
+	s.mux.HandleFunc("/v1/responses", s.handleOpenAIResponses)
 
 	// 健康检查
 	s.mux.HandleFunc("/health", s.handleHealth)

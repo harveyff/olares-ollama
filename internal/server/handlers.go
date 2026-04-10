@@ -610,6 +610,661 @@ func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	s.handleOpenAIInferenceRequest(w, r)
 }
 
+// ---------------------------------------------------------------------------
+// OpenAI Responses API  (/v1/responses)
+// ---------------------------------------------------------------------------
+
+// handleOpenAIResponses handles the OpenAI Responses API endpoint.
+// It converts Responses API requests to Ollama /api/chat and converts the
+// response back to the Responses API format (both streaming and non-streaming).
+func (s *Server) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) {
+	log.Printf("=== OpenAI Responses API endpoint: %s %s, RemoteAddr=%s ===",
+		r.Method, r.URL.Path, r.RemoteAddr)
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method == "GET" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		return
+	}
+	if r.Method != "POST" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"message": "Method not allowed",
+				"type":    "invalid_request_error",
+			},
+		})
+		return
+	}
+
+	s.handleOpenAIResponsesRequest(w, r)
+}
+
+// handleOpenAIResponsesRequest parses an OpenAI Responses API request,
+// converts it to Ollama /api/chat, proxies, and converts the response back.
+func (s *Server) handleOpenAIResponsesRequest(w http.ResponseWriter, r *http.Request) {
+	log.Printf(">>> Starting OpenAI Responses API request processing <<<")
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("!!! Failed to read Responses API body: %v !!!", err)
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	if len(body) == 0 {
+		http.Error(w, "Request body cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	bodyPreview := string(body)
+	if len(bodyPreview) > 500 {
+		bodyPreview = bodyPreview[:500] + "..."
+	}
+	log.Printf(">>> Responses API body preview: %s <<<", bodyPreview)
+
+	var req map[string]interface{}
+	if err := json.Unmarshal(body, &req); err != nil {
+		log.Printf("!!! Failed to parse Responses API JSON: %v !!!", err)
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// ---- Convert input + instructions → Ollama messages ----
+	instructions, _ := req["instructions"].(string)
+	ollamaMessages, err := convertResponsesInputToMessages(req["input"], instructions)
+	if err != nil {
+		log.Printf("!!! Failed to convert Responses API input: %v !!!", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(ollamaMessages) == 0 {
+		http.Error(w, "No valid messages in input", http.StatusBadRequest)
+		return
+	}
+
+	stream := false
+	if v, ok := req["stream"].(bool); ok {
+		stream = v
+	}
+
+	ollamaRequest := map[string]interface{}{
+		"model":    s.config.Model,
+		"messages": ollamaMessages,
+		"stream":   stream,
+	}
+
+	// Inject default options (repeat_penalty, repeat_last_n) and optional caller params.
+	options := map[string]interface{}{}
+	if s.config.RepeatPenalty > 0 {
+		options["repeat_penalty"] = s.config.RepeatPenalty
+	}
+	if s.config.RepeatLastN > 0 {
+		options["repeat_last_n"] = s.config.RepeatLastN
+	}
+	if temp, ok := req["temperature"]; ok {
+		options["temperature"] = temp
+	}
+	if topP, ok := req["top_p"]; ok {
+		options["top_p"] = topP
+	}
+	if maxOut, ok := req["max_output_tokens"]; ok {
+		options["num_predict"] = maxOut
+	}
+	if len(options) > 0 {
+		ollamaRequest["options"] = options
+	}
+
+	// Convert tools from Responses API flat format to Ollama nested format.
+	if toolsRaw, ok := req["tools"]; ok {
+		if tools, ok := toolsRaw.([]interface{}); ok && len(tools) > 0 {
+			ollamaRequest["tools"] = convertResponsesToolsToOllama(tools)
+		}
+	}
+	if tc, ok := req["tool_choice"]; ok {
+		ollamaRequest["tool_choice"] = tc
+	}
+
+	// Resolve thinking / reasoning.
+	if !s.config.ThinkingEnabled {
+		ollamaRequest["think"] = false
+	} else if reasoning, ok := req["reasoning"].(map[string]interface{}); ok {
+		effort, _ := reasoning["effort"].(string)
+		ollamaRequest["think"] = !(effort == "low" || effort == "none")
+	} else {
+		ollamaRequest["think"] = true
+	}
+
+	modifiedBody, err := json.Marshal(ollamaRequest)
+	if err != nil {
+		log.Printf("!!! Failed to marshal Ollama request: %v !!!", err)
+		http.Error(w, "Failed to prepare request", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf(">>> Converted Responses API → Ollama: size=%d, model=%s, msgs=%d, stream=%v <<<",
+		len(modifiedBody), s.config.Model, len(ollamaMessages), stream)
+
+	headers := make(map[string]string)
+	for key, values := range r.Header {
+		if len(values) > 0 && !strings.HasPrefix(strings.ToLower(key), "host") {
+			headers[key] = values[0]
+		}
+	}
+	headers["Content-Type"] = "application/json"
+
+	resp, err := s.ollamaClient.ProxyRequest("POST", "/api/chat", bytes.NewReader(modifiedBody), headers)
+	if err != nil {
+		log.Printf("!!! Failed to proxy Responses API → Ollama: %v !!!", err)
+		http.Error(w, "Failed to proxy request", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	log.Printf("<<< Ollama returned status %d for Responses API request <<<", resp.StatusCode)
+
+	if resp.StatusCode != http.StatusOK {
+		errorBody, _ := io.ReadAll(resp.Body)
+		log.Printf("!!! Ollama error: %s !!!", string(errorBody))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"message": fmt.Sprintf("Upstream error: %s", string(errorBody)),
+				"type":    "server_error",
+			},
+		})
+		return
+	}
+
+	if stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Transfer-Encoding", "chunked")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		s.convertOllamaStreamToResponsesAPI(w, resp.Body, s.config.Model)
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		s.convertOllamaToResponsesAPI(w, resp.Body, s.config.Model)
+	}
+}
+
+// convertResponsesInputToMessages maps the Responses API "input" field
+// (string or item array) plus optional "instructions" to Ollama messages.
+func convertResponsesInputToMessages(input interface{}, instructions string) ([]map[string]interface{}, error) {
+	var msgs []map[string]interface{}
+
+	if instructions != "" {
+		msgs = append(msgs, map[string]interface{}{"role": "system", "content": instructions})
+	}
+
+	if input == nil {
+		return nil, fmt.Errorf("missing 'input' field")
+	}
+
+	// Simple string → single user message.
+	if s, ok := input.(string); ok {
+		msgs = append(msgs, map[string]interface{}{"role": "user", "content": s})
+		return msgs, nil
+	}
+
+	arr, ok := input.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid 'input': expected string or array")
+	}
+
+	for _, item := range arr {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		switch t, _ := m["type"].(string); t {
+		case "message":
+			role, _ := m["role"].(string)
+			if role == "developer" {
+				role = "system"
+			}
+			content := flattenResponsesContent(m["content"])
+			msgs = append(msgs, map[string]interface{}{"role": role, "content": content})
+
+		case "function_call":
+			name, _ := m["name"].(string)
+			argsStr, _ := m["arguments"].(string)
+			callID, _ := m["call_id"].(string)
+			if callID == "" {
+				callID, _ = m["id"].(string)
+			}
+			var argsVal interface{} = argsStr
+			var parsed map[string]interface{}
+			if json.Unmarshal([]byte(argsStr), &parsed) == nil {
+				argsVal = parsed
+			}
+			msgs = append(msgs, map[string]interface{}{
+				"role":    "assistant",
+				"content": "",
+				"tool_calls": []map[string]interface{}{
+					{"function": map[string]interface{}{"name": name, "arguments": argsVal}},
+				},
+			})
+
+		case "function_call_output":
+			callID, _ := m["call_id"].(string)
+			output, _ := m["output"].(string)
+			msgs = append(msgs, map[string]interface{}{
+				"role":         "tool",
+				"content":      output,
+				"tool_call_id": callID,
+			})
+
+		default:
+			log.Printf(">>> Skipping unknown Responses API input item type: %s <<<", t)
+		}
+	}
+	return msgs, nil
+}
+
+// flattenResponsesContent extracts text from Responses API content
+// (string or array of {type,text} parts).
+func flattenResponsesContent(content interface{}) string {
+	if content == nil {
+		return ""
+	}
+	if s, ok := content.(string); ok {
+		return s
+	}
+	arr, ok := content.([]interface{})
+	if !ok {
+		return fmt.Sprintf("%v", content)
+	}
+	var parts []string
+	for _, item := range arr {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		switch t, _ := m["type"].(string); t {
+		case "input_text", "text", "output_text":
+			if text, ok := m["text"].(string); ok {
+				parts = append(parts, text)
+			}
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+// convertResponsesToolsToOllama converts tool definitions from the flat
+// Responses API format to the nested format used by Ollama / Chat Completions.
+func convertResponsesToolsToOllama(tools []interface{}) []interface{} {
+	var out []interface{}
+	for _, tool := range tools {
+		tm, ok := tool.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if _, nested := tm["function"]; nested {
+			out = append(out, tm)
+			continue
+		}
+		if tp, _ := tm["type"].(string); tp != "function" {
+			continue
+		}
+		fn := map[string]interface{}{"name": tm["name"]}
+		if d, ok := tm["description"]; ok {
+			fn["description"] = d
+		}
+		if p, ok := tm["parameters"]; ok {
+			fn["parameters"] = p
+		}
+		if st, ok := tm["strict"]; ok {
+			fn["strict"] = st
+		}
+		out = append(out, map[string]interface{}{"type": "function", "function": fn})
+	}
+	return out
+}
+
+// convertOllamaToResponsesAPI converts a non-streaming Ollama /api/chat
+// response into the OpenAI Responses API format.
+func (s *Server) convertOllamaToResponsesAPI(w http.ResponseWriter, body io.Reader, modelName string) {
+	bodyBytes, err := io.ReadAll(body)
+	if err != nil {
+		log.Printf("!!! Error reading Ollama response (Responses API): %v !!!", err)
+		writeResponsesError(w, "Failed to read response")
+		return
+	}
+
+	var ollamaResp map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &ollamaResp); err != nil {
+		log.Printf("!!! Error parsing Ollama response (Responses API): %v !!!", err)
+		writeResponsesError(w, "Failed to parse response")
+		return
+	}
+
+	message, ok := ollamaResp["message"].(map[string]interface{})
+	if !ok {
+		writeResponsesError(w, "Invalid response format")
+		return
+	}
+
+	content, _ := message["content"].(string)
+	now := time.Now().Unix()
+	responseID := fmt.Sprintf("resp_%d", now)
+	msgID := fmt.Sprintf("msg_%d", now)
+
+	var output []interface{}
+
+	if content != "" {
+		output = append(output, map[string]interface{}{
+			"type": "message", "id": msgID, "status": "completed", "role": "assistant",
+			"content": []map[string]interface{}{
+				{"type": "output_text", "text": content, "annotations": []interface{}{}},
+			},
+		})
+	}
+
+	if rawTC, ok := message["tool_calls"].([]interface{}); ok {
+		for i, tc := range rawTC {
+			tcMap, _ := tc.(map[string]interface{})
+			if tcMap == nil {
+				continue
+			}
+			fn, _ := tcMap["function"].(map[string]interface{})
+			if fn == nil {
+				continue
+			}
+			name, _ := fn["name"].(string)
+			argsStr := marshalArgs(fn["arguments"])
+			output = append(output, map[string]interface{}{
+				"type": "function_call", "id": fmt.Sprintf("fc_%d_%d", now, i),
+				"call_id": fmt.Sprintf("call_%d_%d", now, i),
+				"name": name, "arguments": argsStr, "status": "completed",
+			})
+		}
+	}
+
+	if len(output) == 0 {
+		output = append(output, map[string]interface{}{
+			"type": "message", "id": msgID, "status": "completed", "role": "assistant",
+			"content": []map[string]interface{}{
+				{"type": "output_text", "text": "", "annotations": []interface{}{}},
+			},
+		})
+	}
+
+	usage := extractUsage(ollamaResp)
+
+	result := map[string]interface{}{
+		"id": responseID, "object": "response", "created_at": now,
+		"status": "completed", "model": modelName, "output": output, "usage": usage,
+	}
+
+	out, _ := json.Marshal(result)
+	w.Write(out)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	log.Printf("<<< Sent Responses API non-stream response (%d bytes) <<<", len(out))
+}
+
+// convertOllamaStreamToResponsesAPI converts an Ollama streaming response
+// into the OpenAI Responses API Server-Sent Events format.
+func (s *Server) convertOllamaStreamToResponsesAPI(w http.ResponseWriter, body io.Reader, modelName string) {
+	flusher, hasFlusher := w.(http.Flusher)
+	scanner := bufio.NewScanner(body)
+	buf := make([]byte, 0, 256*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	now := time.Now().Unix()
+	responseID := fmt.Sprintf("resp_%d", now)
+	msgID := fmt.Sprintf("msg_%d", now)
+
+	var fullText strings.Builder
+	headerSent := false
+
+	emit := func(v interface{}) {
+		data, _ := json.Marshal(v)
+		w.Write([]byte(fmt.Sprintf("data: %s\n\n", data)))
+		if hasFlusher {
+			flusher.Flush()
+		}
+	}
+
+	emitHeader := func() {
+		if headerSent {
+			return
+		}
+		headerSent = true
+
+		baseResp := map[string]interface{}{
+			"id": responseID, "object": "response", "created_at": now,
+			"status": "in_progress", "model": modelName, "output": []interface{}{},
+		}
+		emit(map[string]interface{}{"type": "response.created", "response": baseResp})
+
+		emit(map[string]interface{}{
+			"type": "response.output_item.added", "output_index": 0,
+			"item": map[string]interface{}{
+				"type": "message", "id": msgID, "status": "in_progress",
+				"role": "assistant", "content": []interface{}{},
+			},
+		})
+
+		emit(map[string]interface{}{
+			"type": "response.content_part.added", "output_index": 0, "content_index": 0,
+			"part": map[string]interface{}{
+				"type": "output_text", "text": "", "annotations": []interface{}{},
+			},
+		})
+	}
+
+	finishText := func(usage map[string]interface{}) {
+		txt := fullText.String()
+
+		emit(map[string]interface{}{
+			"type": "response.output_text.done", "output_index": 0, "content_index": 0,
+			"text": txt,
+		})
+		emit(map[string]interface{}{
+			"type": "response.content_part.done", "output_index": 0, "content_index": 0,
+			"part": map[string]interface{}{"type": "output_text", "text": txt, "annotations": []interface{}{}},
+		})
+
+		msgItem := map[string]interface{}{
+			"type": "message", "id": msgID, "status": "completed", "role": "assistant",
+			"content": []map[string]interface{}{
+				{"type": "output_text", "text": txt, "annotations": []interface{}{}},
+			},
+		}
+		emit(map[string]interface{}{"type": "response.output_item.done", "output_index": 0, "item": msgItem})
+	}
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var chunk map[string]interface{}
+		if err := json.Unmarshal(line, &chunk); err != nil {
+			log.Printf("!!! Responses stream: bad JSON line: %v !!!", err)
+			continue
+		}
+
+		message, _ := chunk["message"].(map[string]interface{})
+		done, _ := chunk["done"].(bool)
+
+		if done {
+			usage := extractUsage(chunk)
+			hasToolCalls := false
+
+			if message != nil {
+				if rawTC, ok := message["tool_calls"].([]interface{}); ok && len(rawTC) > 0 {
+					hasToolCalls = true
+
+					if headerSent {
+						finishText(usage)
+					}
+
+					var outputItems []interface{}
+					if headerSent {
+						outputItems = append(outputItems, map[string]interface{}{
+							"type": "message", "id": msgID, "status": "completed", "role": "assistant",
+							"content": []map[string]interface{}{
+								{"type": "output_text", "text": fullText.String(), "annotations": []interface{}{}},
+							},
+						})
+					}
+
+					for i, tc := range rawTC {
+						tcMap, _ := tc.(map[string]interface{})
+						if tcMap == nil {
+							continue
+						}
+						fn, _ := tcMap["function"].(map[string]interface{})
+						if fn == nil {
+							continue
+						}
+						name, _ := fn["name"].(string)
+						argsStr := marshalArgs(fn["arguments"])
+						outIdx := len(outputItems)
+						callID := fmt.Sprintf("call_%d_%d", now, i)
+						fcID := fmt.Sprintf("fc_%d_%d", now, i)
+
+						emit(map[string]interface{}{
+							"type": "response.output_item.added", "output_index": outIdx,
+							"item": map[string]interface{}{
+								"type": "function_call", "id": fcID, "call_id": callID,
+								"name": name, "arguments": "", "status": "in_progress",
+							},
+						})
+						emit(map[string]interface{}{
+							"type": "response.function_call_arguments.delta",
+							"output_index": outIdx, "delta": argsStr,
+						})
+						emit(map[string]interface{}{
+							"type": "response.function_call_arguments.done",
+							"output_index": outIdx, "arguments": argsStr,
+						})
+
+						fcItem := map[string]interface{}{
+							"type": "function_call", "id": fcID, "call_id": callID,
+							"name": name, "arguments": argsStr, "status": "completed",
+						}
+						emit(map[string]interface{}{
+							"type": "response.output_item.done", "output_index": outIdx, "item": fcItem,
+						})
+						outputItems = append(outputItems, fcItem)
+					}
+
+					emit(map[string]interface{}{
+						"type": "response.completed",
+						"response": map[string]interface{}{
+							"id": responseID, "object": "response", "created_at": now,
+							"status": "completed", "model": modelName,
+							"output": outputItems, "usage": usage,
+						},
+					})
+				}
+			}
+
+			if !hasToolCalls {
+				if !headerSent {
+					emitHeader()
+				}
+				finishText(usage)
+
+				emit(map[string]interface{}{
+					"type": "response.completed",
+					"response": map[string]interface{}{
+						"id": responseID, "object": "response", "created_at": now,
+						"status": "completed", "model": modelName,
+						"output": []interface{}{
+							map[string]interface{}{
+								"type": "message", "id": msgID, "status": "completed", "role": "assistant",
+								"content": []map[string]interface{}{
+									{"type": "output_text", "text": fullText.String(), "annotations": []interface{}{}},
+								},
+							},
+						},
+						"usage": usage,
+					},
+				})
+			}
+			break
+		}
+
+		// Intermediate content chunk.
+		if message == nil {
+			continue
+		}
+		content, _ := message["content"].(string)
+		if content != "" {
+			if !headerSent {
+				emitHeader()
+			}
+			fullText.WriteString(content)
+			emit(map[string]interface{}{
+				"type": "response.output_text.delta", "output_index": 0, "content_index": 0,
+				"delta": content,
+			})
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Printf("!!! Responses stream scanner error: %v !!!", err)
+	}
+	log.Printf("<<< Converted and sent Responses API stream <<<")
+}
+
+// marshalArgs converts Ollama tool-call arguments (string or map) to a JSON string.
+func marshalArgs(args interface{}) string {
+	if args == nil {
+		return "{}"
+	}
+	if s, ok := args.(string); ok {
+		return s
+	}
+	if b, err := json.Marshal(args); err == nil {
+		return string(b)
+	}
+	return "{}"
+}
+
+// extractUsage pulls token counts from an Ollama response into a Responses API usage map.
+func extractUsage(resp map[string]interface{}) map[string]interface{} {
+	u := map[string]interface{}{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+	var total int
+	if v, ok := resp["prompt_eval_count"].(float64); ok {
+		u["input_tokens"] = int(v)
+		total += int(v)
+	}
+	if v, ok := resp["eval_count"].(float64); ok {
+		u["output_tokens"] = int(v)
+		total += int(v)
+	}
+	u["total_tokens"] = total
+	return u
+}
+
+// writeResponsesError writes a Responses API error JSON body.
+func writeResponsesError(w http.ResponseWriter, msg string) {
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": map[string]interface{}{"message": msg, "type": "server_error"},
+	})
+}
+
 // handleOpenAIModels handles OpenAI compatible models endpoint
 func (s *Server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
 	log.Printf("=== OpenAI Models endpoint: Method=%s ===", r.Method)
