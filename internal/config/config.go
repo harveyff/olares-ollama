@@ -14,7 +14,7 @@ type Config struct {
 	AppURL             string // Application URL for API access
 	OllamaPullDelaySec int    // Seconds to wait after Ollama is ready before first pull (for blob index to load, helps resume after restart)
 	BaseMode           bool   // Base mode: no specific model, show guide + version + model list
-	ThinkingEnabled    bool    // Default thinking mode for models that support it (Qwen3.5, DeepSeek, etc.)
+	ThinkingMode       string  // "true" = auto-inject think:true, "false" = force think:false, "" = pass through (no injection)
 	ContextLength      int    // Default num_ctx to inject into requests (0 = don't inject, let model/Ollama decide)
 	RepeatPenalty      float64 // Default repeat_penalty injected into requests (0 = don't inject)
 	RepeatLastN        int     // Default repeat_last_n injected into requests (0 = don't inject)
@@ -48,7 +48,7 @@ func Load() *Config {
 		AppURL:             getEnv("APP_URL", ""),
 		OllamaPullDelaySec: getEnvInt("OLLAMA_PULL_DELAY_SECONDS", 30),
 		BaseMode:           model == "" && !ggufMode,
-		ThinkingEnabled:    getEnvBool("OLLAMA_THINKING", true),
+		ThinkingMode:       getEnv("OLLAMA_THINKING", ""),
 		ContextLength:      getEnvInt("OLLAMA_CONTEXT_LENGTH", 0),
 		RepeatPenalty:      getEnvFloat("OLLAMA_REPEAT_PENALTY", 0),
 		RepeatLastN:        getEnvInt("OLLAMA_REPEAT_LAST_N", 0),
