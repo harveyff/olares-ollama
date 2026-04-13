@@ -29,6 +29,8 @@ type ProgressManager struct {
 	lastCompleted  int64     // 上一时刻已下载字节数，用于计算速度
 	lastUpdateTime time.Time // 上一时刻更新时间
 	speedBps       float64   // 当前下载速度（字节/秒）
+	errorMessage   string    // 错误详情，仅在 status=="error" 时有值
+	downloadSource string    // 下载源地址，用于错误提示（如 HF endpoint 或 Ollama URL）
 }
 
 // persistedState 持久化的状态
@@ -41,17 +43,18 @@ type persistedState struct {
 
 // ProgressUpdate 进度更新信息
 type ProgressUpdate struct {
-	Status      string  `json:"status"`
-	Progress    float64 `json:"progress"`
-	Total       int64   `json:"total"`
-	Completed   int64   `json:"completed"`
-	ModelName   string  `json:"model_name"`
-	Timestamp   int64   `json:"timestamp"`             // 当前时间戳（用于实时更新）
-	CompletedAt *int64  `json:"completed_at,omitempty"` // 完成时间戳（固定不变）
-	Duration    *int64  `json:"duration,omitempty"`     // 用时（秒）
-	SpeedBps    float64 `json:"speed_bps,omitempty"`   // 下载速度（字节/秒）
-	EtaSeconds  *int64  `json:"eta_seconds,omitempty"`  // 预计剩余时间（秒）
-	EtaAt       *int64  `json:"eta_at,omitempty"`       // 预计完成时间戳
+	Status       string  `json:"status"`
+	Progress     float64 `json:"progress"`
+	Total        int64   `json:"total"`
+	Completed    int64   `json:"completed"`
+	ModelName    string  `json:"model_name"`
+	Timestamp    int64   `json:"timestamp"`              // 当前时间戳（用于实时更新）
+	CompletedAt  *int64  `json:"completed_at,omitempty"` // 完成时间戳（固定不变）
+	Duration     *int64  `json:"duration,omitempty"`     // 用时（秒）
+	SpeedBps     float64 `json:"speed_bps,omitempty"`    // 下载速度（字节/秒）
+	EtaSeconds   *int64  `json:"eta_seconds,omitempty"`  // 预计剩余时间（秒）
+	EtaAt        *int64  `json:"eta_at,omitempty"`       // 预计完成时间戳
+	ErrorMessage string  `json:"error_message,omitempty"` // 错误详情
 }
 
 // NewProgressManager 创建新的进度管理器
@@ -151,10 +154,43 @@ func (pm *ProgressManager) saveState() {
 	log.Printf("Saved progress state to %s", pm.stateFile)
 }
 
+// SetDownloadSource sets the download source URL shown in error hints
+// (e.g. HF endpoint or Ollama registry URL).
+func (pm *ProgressManager) SetDownloadSource(source string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.downloadSource = source
+}
+
+// SetErrorMessage sets the error detail text (capped at 500 chars).
+// It is typically called right before UpdateProgress("error", …).
+func (pm *ProgressManager) SetErrorMessage(msg string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	const maxLen = 500
+	if len(msg) > maxLen {
+		pm.errorMessage = msg[:maxLen] + "..."
+	} else {
+		pm.errorMessage = msg
+	}
+}
+
+// UpdateError is a convenience wrapper: sets the error message and then updates
+// the progress status to "error" in one call.
+func (pm *ProgressManager) UpdateError(errMsg string, completed, total int64, modelName string) {
+	pm.SetErrorMessage(errMsg)
+	pm.UpdateProgress("error", completed, total, modelName)
+}
+
 // UpdateProgress 更新下载进度
 func (pm *ProgressManager) UpdateProgress(status string, completed, total int64, modelName string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+
+	// Clear error message when transitioning away from error state
+	if status != "error" {
+		pm.errorMessage = ""
+	}
 
 	now := time.Now()
 	if status == "starting" {
@@ -207,13 +243,14 @@ func (pm *ProgressManager) GetProgress() ProgressUpdate {
 
 	now := time.Now()
 	update := ProgressUpdate{
-		Status:    pm.status,
-		Progress:  pm.progress,
-		Total:     pm.total,
-		Completed: pm.completed,
-		ModelName: pm.modelName,
-		Timestamp: now.Unix(),
-		SpeedBps:  pm.speedBps,
+		Status:       pm.status,
+		Progress:     pm.progress,
+		Total:        pm.total,
+		Completed:    pm.completed,
+		ModelName:    pm.modelName,
+		Timestamp:    now.Unix(),
+		SpeedBps:     pm.speedBps,
+		ErrorMessage: pm.errorMessage,
 	}
 
 	// 下载中且速度有效时，计算预计剩余时间和完成时间
@@ -250,6 +287,10 @@ func (pm *ProgressManager) HandleProgressAPI(w http.ResponseWriter, r *http.Requ
 
 	progress := pm.GetProgress()
 
+	pm.mu.RLock()
+	downloadSource := pm.downloadSource
+	pm.mu.RUnlock()
+
 	response := map[string]interface{}{
 		"status":     progress.Status,
 		"progress":   progress.Progress,
@@ -258,6 +299,9 @@ func (pm *ProgressManager) HandleProgressAPI(w http.ResponseWriter, r *http.Requ
 		"model_name": progress.ModelName,
 		"timestamp":  progress.Timestamp,
 		"app_url":    pm.appURL,
+	}
+	if downloadSource != "" {
+		response["download_source"] = downloadSource
 	}
 	if progress.SpeedBps > 0 {
 		response["speed_bps"] = progress.SpeedBps
@@ -275,6 +319,9 @@ func (pm *ProgressManager) HandleProgressAPI(w http.ResponseWriter, r *http.Requ
 	}
 	if progress.Duration != nil {
 		response["duration"] = *progress.Duration
+	}
+	if progress.ErrorMessage != "" {
+		response["error_message"] = progress.ErrorMessage
 	}
 
 	if err := json.NewEncoder(w).Encode(response); err != nil {

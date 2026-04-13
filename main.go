@@ -65,8 +65,16 @@ func main() {
 		// Register /api/retry endpoint
 		srv.RegisterRetryHandler(retryCh)
 
+		// Set download source for error hints
+		pm := srv.GetProgressManager()
+		if cfg.GGUFMode {
+			pm.SetDownloadSource(cfg.HFEndpoint)
+		} else {
+			pm.SetDownloadSource(cfg.OllamaURL)
+		}
+
 		// Check and download model in background with infinite retry
-		go ensureModelLoop(ollamaClient, cfg, srv.GetProgressManager(), retryCh)
+		go ensureModelLoop(ollamaClient, cfg, pm, retryCh)
 	} else {
 		log.Printf("Base mode UI at: http://localhost:%d", cfg.Port)
 	}
@@ -114,7 +122,7 @@ func ensureModelLoop(client *ollama.Client, cfg *config.Config, progressManager 
 		}
 
 		log.Printf("Failed to ensure model: %v", err)
-		progressManager.UpdateProgress("error", 0, 0, modelName)
+		progressManager.UpdateError(err.Error(), 0, 0, modelName)
 
 		log.Printf("Will retry in %v (or immediately on /api/retry)...", backoff)
 		select {
@@ -412,8 +420,9 @@ func ensureModel(client *ollama.Client, modelName string, ollamaPullDelaySec int
 
 			transientCount = 0
 			if attempt == maxRetries {
-				progressManager.UpdateProgress("error", 0, 0, modelName)
-				return fmt.Errorf("failed to pull model after %d attempts: %w", maxRetries, err)
+				finalErr := fmt.Errorf("failed to pull model after %d attempts: %w", maxRetries, err)
+				progressManager.UpdateError(finalErr.Error(), 0, 0, modelName)
+				return finalErr
 			}
 
 			log.Printf("Waiting 10 seconds before retry...")
@@ -428,8 +437,9 @@ func ensureModel(client *ollama.Client, modelName string, ollamaPullDelaySec int
 	if err != nil {
 		log.Printf("Warning: Failed to verify model after download: %v", err)
 	} else if !exists {
-		progressManager.UpdateProgress("error", 0, 0, modelName)
-		return fmt.Errorf("model %s download completed but model is not available", modelName)
+		finalErr := fmt.Errorf("model %s download completed but model is not available", modelName)
+		progressManager.UpdateError(finalErr.Error(), 0, 0, modelName)
+		return finalErr
 	}
 
 	log.Printf("Model %s downloaded and verified successfully", modelName)

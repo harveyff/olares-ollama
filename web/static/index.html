@@ -398,7 +398,15 @@
                 } else if (status === 'error') {
                     this.updateStatus('Something went wrong', 'error');
                     this.elements.progressContainer.classList.add('hidden');
-                    this.showStatusHint('Don\'t worry — we\'ll automatically retry in a moment. You can also try now: <button onclick="triggerRetry()" style="background:#4f46e5;color:#fff;border:none;padding:6px 20px;border-radius:6px;cursor:pointer;font-size:14px;margin-left:4px;">Retry Now</button>');
+                    let hintHtml = '';
+                    if (data.error_message) {
+                        hintHtml += '<div style="background:#fff5f5;border:1px solid #fed7d7;border-radius:6px;padding:10px 14px;margin-bottom:10px;font-family:\'SF Mono\',SFMono-Regular,Consolas,monospace;font-size:0.82em;color:#9b2c2c;word-break:break-word;max-height:80px;overflow-y:auto;line-height:1.5;">' + this.escapeHtml(data.error_message) + '</div>';
+                    }
+                    if (data.download_source) {
+                        hintHtml += 'Please check your network and make sure you can reach <a href="' + this.escapeHtml(data.download_source) + '" target="_blank" style="color:#4f46e5;font-weight:600;">' + this.escapeHtml(data.download_source) + '</a>. ';
+                    }
+                    hintHtml += 'We\'ll automatically retry in a moment. You can also try now: <button onclick="triggerRetry()" style="background:#4f46e5;color:#fff;border:none;padding:6px 20px;border-radius:6px;cursor:pointer;font-size:14px;margin-left:4px;">Retry Now</button>';
+                    this.showStatusHint(hintHtml);
                 } else if (status === 'checking') {
                     this.updateStatus(`Model found — checking for updates...`, 'loading');
                     this.elements.progressContainer.classList.add('hidden');
@@ -505,6 +513,12 @@
                 } else {
                     this.elements.progressSpeedEta.classList.add('hidden');
                 }
+            }
+            
+            escapeHtml(text) {
+                const div = document.createElement('div');
+                div.appendChild(document.createTextNode(text));
+                return div.innerHTML;
             }
             
             showApiUrl(appUrl) {
