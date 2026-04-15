@@ -448,14 +448,15 @@ func (s *Server) handleInferenceRequest(w http.ResponseWriter, r *http.Request, 
 		log.Printf("!!! Warning: Ollama returned non-success status %d !!!", resp.StatusCode)
 	}
 
-	// Copy response headers (except for ones that should be controlled by the response writer)
+	// Copy response headers, skipping headers managed by the response writer or CORS middleware
 	for key, values := range resp.Header {
 		keyLower := strings.ToLower(key)
-		// Skip headers that should be controlled by the response writer
-		if keyLower != "content-length" && keyLower != "transfer-encoding" && keyLower != "connection" {
-			for _, value := range values {
-				w.Header().Add(key, value)
-			}
+		if keyLower == "content-length" || keyLower == "transfer-encoding" || keyLower == "connection" ||
+			strings.HasPrefix(keyLower, "access-control-") {
+			continue
+		}
+		for _, value := range values {
+			w.Header().Add(key, value)
 		}
 	}
 
@@ -562,8 +563,11 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Copy response headers
+	// Copy response headers, skipping CORS headers already set by middleware
 	for key, values := range resp.Header {
+		if strings.HasPrefix(strings.ToLower(key), "access-control-") {
+			continue
+		}
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
