@@ -1477,6 +1477,16 @@ func (s *Server) handleOpenAIInferenceRequest(w http.ResponseWriter, r *http.Req
 			stream = streamBool
 		}
 	}
+
+	// Honor `stream_options.include_usage`. Defaults to false (OpenAI spec):
+	// when a client does not request it (e.g. older OpenAI SDKs), do not emit
+	// the extra usage chunk to avoid surprising parsers.
+	includeUsage := false
+	if so, ok := openaiRequest["stream_options"].(map[string]interface{}); ok {
+		if iu, ok := so["include_usage"].(bool); ok {
+			includeUsage = iu
+		}
+	}
 	
 	ollamaRequest := map[string]interface{}{
 		"model":    s.config.Model,
@@ -1586,7 +1596,7 @@ func (s *Server) handleOpenAIInferenceRequest(w http.ResponseWriter, r *http.Req
 	// Convert Ollama response to OpenAI format
 	if stream {
 		// Handle streaming response
-		s.convertOllamaStreamToOpenAI(w, resp.Body, s.config.Model)
+		s.convertOllamaStreamToOpenAI(w, resp.Body, s.config.Model, includeUsage)
 	} else {
 		// Handle non-streaming response
 		s.convertOllamaToOpenAI(w, resp.Body, s.config.Model)
@@ -1685,10 +1695,15 @@ func (s *Server) convertOllamaToOpenAI(w http.ResponseWriter, body io.Reader, mo
 	log.Printf("<<< Converted and sent OpenAI format response (%d bytes) <<<", len(responseJSON))
 }
 
-// convertOllamaStreamToOpenAI converts Ollama streaming response to OpenAI SSE format
-func (s *Server) convertOllamaStreamToOpenAI(w http.ResponseWriter, body io.Reader, modelName string) {
+// convertOllamaStreamToOpenAI converts Ollama streaming response to OpenAI SSE format.
+// When includeUsage is true (client sent stream_options.include_usage=true),
+// an extra usage-only chunk is emitted before [DONE] per OpenAI spec, so callers
+// that track token consumption (LangChain, OpenAI SDKs >=1.x) see real numbers.
+func (s *Server) convertOllamaStreamToOpenAI(w http.ResponseWriter, body io.Reader, modelName string, includeUsage bool) {
 	flusher, hasFlusher := w.(http.Flusher)
 	scanner := bufio.NewScanner(body)
+	// Larger buffer: Ollama can emit very long lines with reasoning_content + tool_calls
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	responseID := fmt.Sprintf("chatcmpl-%d", time.Now().Unix())
 	created := time.Now().Unix()
 	var totalBytes int64
@@ -1759,6 +1774,36 @@ func (s *Server) convertOllamaStreamToOpenAI(w http.ResponseWriter, body io.Read
 			}
 			finalJSON, _ := json.Marshal(finalChunk)
 			w.Write([]byte(fmt.Sprintf("data: %s\n\n", finalJSON)))
+
+			// Per OpenAI streaming spec: when stream_options.include_usage=true,
+			// emit an extra chunk with empty choices and a populated usage block
+			// before [DONE]. Ollama always provides eval_count/prompt_eval_count
+			// on the done=true line, so translate them into OpenAI's shape.
+			if includeUsage {
+				promptTokens := 0
+				completionTokens := 0
+				if v, ok := ollamaResp["prompt_eval_count"].(float64); ok {
+					promptTokens = int(v)
+				}
+				if v, ok := ollamaResp["eval_count"].(float64); ok {
+					completionTokens = int(v)
+				}
+				usageChunk := map[string]interface{}{
+					"id":      responseID,
+					"object":  "chat.completion.chunk",
+					"created": created,
+					"model":   modelName,
+					"choices": []map[string]interface{}{},
+					"usage": map[string]interface{}{
+						"prompt_tokens":     promptTokens,
+						"completion_tokens": completionTokens,
+						"total_tokens":      promptTokens + completionTokens,
+					},
+				}
+				usageJSON, _ := json.Marshal(usageChunk)
+				w.Write([]byte(fmt.Sprintf("data: %s\n\n", usageJSON)))
+			}
+
 			w.Write([]byte("data: [DONE]\n\n"))
 			if hasFlusher {
 				flusher.Flush()
