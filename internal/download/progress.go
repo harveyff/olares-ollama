@@ -13,6 +13,39 @@ import (
 // 1 GiB = 1024^3 bytes，用于单位切换
 const bytesPerGiB = 1024 * 1024 * 1024
 
+// isTransferStatus 判断当前 status 是否处于"正在传输字节"阶段，从而值得计算 ETA。
+// Ollama /api/pull 的 status 形态包括：
+//   - "pulling manifest"            （只是元数据，不算传输）
+//   - "downloading"                 （我们自己设置的）
+//   - "pulling <digest>"            （Ollama 实际数据传输）
+//   - "verifying sha256 digest"     （已下完，不算传输）
+//   - "writing manifest"            （收尾）
+//   - "removing any unused layers"  （收尾）
+//   - "success"                     （完成）
+// HuggingFace 直连模式还有 "pushing_blob"。
+func isTransferStatus(status string) bool {
+	if status == "" {
+		return false
+	}
+	switch status {
+	case "downloading", "pulling", "pushing_blob":
+		return true
+	case "pulling manifest", "verifying", "verifying sha256 digest",
+		"writing manifest", "removing any unused layers",
+		"success", "completed", "error", "starting", "waiting",
+		"checking", "unavailable", "creating", "blob_pushed", "hashing":
+		return false
+	}
+	// "pulling <digest>" / "downloading <…>" 这种带后缀的也算传输。
+	if len(status) >= 8 && status[:8] == "pulling " {
+		return true
+	}
+	if len(status) >= 12 && status[:12] == "downloading " {
+		return true
+	}
+	return false
+}
+
 // ProgressManager 下载进度管理器
 type ProgressManager struct {
 	mu             sync.RWMutex
@@ -254,7 +287,10 @@ func (pm *ProgressManager) GetProgress() ProgressUpdate {
 	}
 
 	// 下载中且速度有效时，计算预计剩余时间和完成时间
-	if (pm.status == "downloading" || pm.status == "pulling") && pm.speedBps > 0 && pm.total > pm.completed {
+	// 注意：Ollama 流式 status 实际是 "pulling <digest>"、"downloading" 或 "pulling manifest"
+	// 等多种形态，不能写死成 "downloading"/"pulling"。只要在传输阶段（有 total/completed
+	// 且速度大于 0），就计算 ETA。
+	if pm.speedBps > 0 && pm.total > pm.completed && isTransferStatus(pm.status) {
 		remaining := pm.total - pm.completed
 		etaSec := int64(float64(remaining) / pm.speedBps)
 		update.EtaSeconds = &etaSec

@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,8 +68,90 @@ func (d *Downloader) AlreadyDone() bool {
 	return err == nil
 }
 
+// maskedURL returns a string-safe URL for logging (strips userinfo/query secrets if any).
+func maskedURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	u.User = nil
+	u.RawQuery = ""
+	return u.String()
+}
+
+// formatBytes returns a human-readable size in B/KiB/MiB/GiB.
+func formatBytes(n int64) string {
+	const (
+		kib = 1024
+		mib = 1024 * kib
+		gib = 1024 * mib
+	)
+	switch {
+	case n >= gib:
+		return fmt.Sprintf("%.2f GiB", float64(n)/float64(gib))
+	case n >= mib:
+		return fmt.Sprintf("%.2f MiB", float64(n)/float64(mib))
+	case n >= kib:
+		return fmt.Sprintf("%.2f KiB", float64(n)/float64(kib))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
+// formatDuration rounds to a sensible unit for log readability.
+func formatDuration(d time.Duration) string {
+	if d < time.Second {
+		return d.Round(time.Millisecond).String()
+	}
+	if d < time.Minute {
+		return d.Round(100 * time.Millisecond).String()
+	}
+	return d.Round(time.Second).String()
+}
+
+// isTransientErr classifies network/IO errors that should trigger an in-process retry
+// instead of bubbling up to the outer ensure-model loop (which has a much longer backoff).
+func isTransientErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, kw := range []string{
+		"connection reset",
+		"connection refused",
+		"broken pipe",
+		"unexpected eof",
+		"timeout",
+		"i/o timeout",
+		"tls handshake",
+		"no such host",
+		"server misbehaving",
+		"temporary failure",
+	} {
+		if strings.Contains(msg, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 // Download fetches the GGUF file with HTTP Range resume.
 // It writes to <file>.part, renames on completion, then creates a .done marker.
+//
+// Retry strategy:
+//   - On transient network errors during the streaming read it auto-retries up to
+//     maxAttempts times in-process with backoff 5s -> 10s -> 20s -> 40s -> 60s,
+//     resuming from the current .part offset via HTTP Range. This is fast-path
+//     recovery that does NOT consume the outer ensure-model loop's backoff.
+//   - On non-transient HTTP errors (4xx other than 416, etc.) it returns
+//     immediately so the outer loop can decide what to do.
 func (d *Downloader) Download(ctx context.Context, modelName string, progress ProgressUpdater) error {
 	if err := os.MkdirAll(d.OutputDir, 0755); err != nil {
 		return fmt.Errorf("create output dir: %w", err)
@@ -75,82 +160,206 @@ func (d *Downloader) Download(ctx context.Context, modelName string, progress Pr
 	dest := d.DestPath()
 	partFile := dest + ".part"
 
-	// If .done exists and full file exists, skip
 	if d.AlreadyDone() {
 		if _, err := os.Stat(dest); err == nil {
-			log.Printf("GGUF file already downloaded: %s", dest)
+			log.Printf("[hf] GGUF already downloaded, skipping: %s", dest)
 			progress.UpdateProgress("completed", 0, 0, modelName)
 			return nil
 		}
+		log.Printf("[hf] .done marker present but file missing, removing marker and re-downloading")
 		os.Remove(d.doneMarker())
 	}
 
-	// Determine existing partial size for resume
-	var existingSize int64
-	if info, err := os.Stat(partFile); err == nil {
-		existingSize = info.Size()
-		log.Printf("Found partial download: %d bytes", existingSize)
+	rawURL := fmt.Sprintf("%s/%s/resolve/main/%s", d.Endpoint, d.Repo, d.File)
+	logURL := maskedURL(rawURL)
+
+	log.Printf("[hf] === GGUF download starting ===")
+	log.Printf("[hf] endpoint  : %s", d.Endpoint)
+	log.Printf("[hf] repo      : %s", d.Repo)
+	log.Printf("[hf] file      : %s", d.File)
+	log.Printf("[hf] url       : %s", logURL)
+	log.Printf("[hf] dest      : %s", dest)
+	log.Printf("[hf] part file : %s", partFile)
+	log.Printf("[hf] auth      : token=%t", d.Token != "")
+
+	const maxAttempts = 5
+	overallStart := time.Now()
+	var lastErr error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		var existingSize int64
+		if info, err := os.Stat(partFile); err == nil {
+			existingSize = info.Size()
+		}
+		log.Printf("[hf] attempt %d/%d: existing partial = %s (%d bytes)",
+			attempt, maxAttempts, formatBytes(existingSize), existingSize)
+
+		err := d.downloadOnce(ctx, rawURL, partFile, existingSize, modelName, progress, attempt, maxAttempts)
+		if err == nil {
+			if err := os.Rename(partFile, dest); err != nil {
+				return fmt.Errorf("rename part file: %w", err)
+			}
+			if err := os.WriteFile(d.doneMarker(), []byte(time.Now().UTC().Format(time.RFC3339)), 0644); err != nil {
+				log.Printf("[hf] warning: failed to write .done marker: %v", err)
+			}
+			finalSize, _ := os.Stat(dest)
+			var sz int64
+			if finalSize != nil {
+				sz = finalSize.Size()
+			}
+			elapsed := time.Since(overallStart)
+			avgSpeed := float64(0)
+			if elapsed.Seconds() > 0 {
+				avgSpeed = float64(sz) / elapsed.Seconds() / (1024 * 1024)
+			}
+			log.Printf("[hf] === GGUF download complete ===")
+			log.Printf("[hf] file=%s size=%s elapsed=%s avg=%.2f MiB/s",
+				dest, formatBytes(sz), formatDuration(elapsed), avgSpeed)
+			progress.UpdateProgress("downloaded", sz, sz, modelName)
+			return nil
+		}
+
+		lastErr = err
+
+		if ctx.Err() != nil {
+			log.Printf("[hf] context cancelled, aborting retry: %v", ctx.Err())
+			return ctx.Err()
+		}
+
+		if !isTransientErr(err) {
+			log.Printf("[hf] non-transient error on attempt %d, not retrying in-process: %v", attempt, err)
+			return err
+		}
+
+		if attempt == maxAttempts {
+			log.Printf("[hf] transient error on final attempt %d/%d, giving up to outer loop: %v",
+				attempt, maxAttempts, err)
+			break
+		}
+
+		// 5s -> 10s -> 20s -> 40s -> 60s
+		wait := time.Duration(5*(1<<uint(attempt-1))) * time.Second
+		if wait > 60*time.Second {
+			wait = 60 * time.Second
+		}
+		log.Printf("[hf] transient error on attempt %d/%d: %v", attempt, maxAttempts, err)
+		log.Printf("[hf] retrying in %s (will resume from current .part offset)...", wait)
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
-	url := fmt.Sprintf("%s/%s/resolve/main/%s", d.Endpoint, d.Repo, d.File)
-	log.Printf("Downloading GGUF from %s", url)
+	return lastErr
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// downloadOnce performs a single HTTP attempt: it issues the GET with the right
+// Range header, opens the .part file in the right mode, and streams the body to disk.
+// On transient mid-stream failures it returns the error so the caller (Download)
+// can retry while preserving the .part file for resume.
+func (d *Downloader) downloadOnce(
+	ctx context.Context,
+	rawURL string,
+	partFile string,
+	existingSize int64,
+	modelName string,
+	progress ProgressUpdater,
+	attempt, maxAttempts int,
+) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return err
 	}
+	req.Header.Set("User-Agent", "olares-ollama/hf-downloader")
 	if d.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+d.Token)
 	}
 	if existingSize > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", existingSize))
-		log.Printf("Resuming from byte %d", existingSize)
+		log.Printf("[hf] sending Range: bytes=%d-", existingSize)
 	}
 
+	reqStart := time.Now()
 	resp, err := d.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("http request: %w", err)
 	}
 	defer resp.Body.Close()
 
+	log.Printf("[hf] response  : status=%s in %s", resp.Status, formatDuration(time.Since(reqStart)))
+	log.Printf("[hf] resp hdr  : Content-Length=%s Accept-Ranges=%q ETag=%q Content-Range=%q",
+		formatBytes(resp.ContentLength),
+		resp.Header.Get("Accept-Ranges"),
+		resp.Header.Get("ETag"),
+		resp.Header.Get("Content-Range"),
+	)
+	if commit := resp.Header.Get("X-Repo-Commit"); commit != "" {
+		log.Printf("[hf] resp hdr  : X-Repo-Commit=%s", commit)
+	}
+	if loc := resp.Header.Get("Location"); loc != "" {
+		log.Printf("[hf] resp hdr  : Location=%s", maskedURL(loc))
+	}
+
+	startFromZero := false
 	switch resp.StatusCode {
 	case http.StatusOK:
-		existingSize = 0 // server ignored Range; start over
+		if existingSize > 0 {
+			log.Printf("[hf] server ignored Range header (returned 200), restarting from byte 0")
+		}
+		startFromZero = true
 	case http.StatusPartialContent:
-		// resume OK
+		log.Printf("[hf] server accepted Range, resuming from byte %d", existingSize)
 	case http.StatusRequestedRangeNotSatisfiable:
-		log.Printf("Range not satisfiable; file may already be complete, re-downloading")
-		existingSize = 0
-		req.Header.Del("Range")
+		log.Printf("[hf] 416 Range Not Satisfiable; .part may already be complete or stale, restarting from 0")
+		startFromZero = true
 		resp.Body.Close()
+		req.Header.Del("Range")
+		reqStart = time.Now()
 		resp, err = d.client.Do(req)
 		if err != nil {
 			return fmt.Errorf("retry http request: %w", err)
 		}
 		defer resp.Body.Close()
+		log.Printf("[hf] response  : status=%s in %s (retry without Range)",
+			resp.Status, formatDuration(time.Since(reqStart)))
 		if resp.StatusCode != http.StatusOK {
 			return fmt.Errorf("unexpected status on retry: %s", resp.Status)
 		}
 	default:
+		// Read a small body slice for diagnostic purposes (4xx/5xx pages may include error messages).
+		var snippet string
+		if resp.Body != nil {
+			b := make([]byte, 512)
+			n, _ := io.ReadFull(resp.Body, b)
+			snippet = strings.TrimSpace(string(b[:n]))
+			if len(snippet) > 256 {
+				snippet = snippet[:256] + "..."
+			}
+		}
+		if snippet != "" {
+			log.Printf("[hf] error body snippet: %q", snippet)
+		}
 		return fmt.Errorf("unexpected HTTP status: %s", resp.Status)
+	}
+
+	if startFromZero {
+		existingSize = 0
 	}
 
 	totalSize := resp.ContentLength + existingSize
 	if resp.StatusCode == http.StatusOK {
 		totalSize = resp.ContentLength
 	}
+	log.Printf("[hf] total size : %s (%d bytes)", formatBytes(totalSize), totalSize)
 
-	log.Printf("Total file size: %d bytes (%.2f GiB)", totalSize, float64(totalSize)/(1024*1024*1024))
-
-	// Open part file for writing (append or truncate)
-	var flags int
+	flags := os.O_WRONLY | os.O_CREATE
 	if existingSize > 0 && resp.StatusCode == http.StatusPartialContent {
-		flags = os.O_WRONLY | os.O_APPEND
+		flags |= os.O_APPEND
 	} else {
-		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
-		existingSize = 0
+		flags |= os.O_TRUNC
 	}
-	f, err := os.OpenFile(partFile, flags|os.O_CREATE, 0644)
+	f, err := os.OpenFile(partFile, flags, 0644)
 	if err != nil {
 		return fmt.Errorf("open part file: %w", err)
 	}
@@ -158,7 +367,9 @@ func (d *Downloader) Download(ctx context.Context, modelName string, progress Pr
 	progress.UpdateProgress("downloading", existingSize, totalSize, modelName)
 
 	const reportInterval = 2 * time.Second
-	lastReport := time.Now()
+	streamStart := time.Now()
+	lastReport := streamStart
+	lastReportBytes := existingSize
 	written := existingSize
 	buf := make([]byte, 256*1024)
 
@@ -166,6 +377,8 @@ func (d *Downloader) Download(ctx context.Context, modelName string, progress Pr
 		select {
 		case <-ctx.Done():
 			f.Close()
+			log.Printf("[hf] context cancelled mid-stream after %s, downloaded %s",
+				formatDuration(time.Since(streamStart)), formatBytes(written))
 			return ctx.Err()
 		default:
 		}
@@ -178,14 +391,41 @@ func (d *Downloader) Download(ctx context.Context, modelName string, progress Pr
 			}
 			written += int64(n)
 
-			if time.Since(lastReport) >= reportInterval {
+			now := time.Now()
+			if now.Sub(lastReport) >= reportInterval {
 				progress.UpdateProgress("downloading", written, totalSize, modelName)
+
+				dt := now.Sub(lastReport).Seconds()
+				deltaBytes := written - lastReportBytes
+				curSpeed := float64(0) // bytes/s
+				if dt > 0 {
+					curSpeed = float64(deltaBytes) / dt
+				}
+				curSpeedMB := curSpeed / (1024 * 1024)
+
+				avgDT := now.Sub(streamStart).Seconds()
+				avgSpeedMB := float64(0)
+				if avgDT > 0 {
+					avgSpeedMB = float64(written-existingSize) / avgDT / (1024 * 1024)
+				}
+
 				pct := float64(0)
 				if totalSize > 0 {
 					pct = float64(written) / float64(totalSize) * 100
 				}
-				log.Printf("Download progress: %.1f%% (%d / %d bytes)", pct, written, totalSize)
-				lastReport = time.Now()
+
+				etaStr := "?"
+				if curSpeed > 0 && totalSize > 0 {
+					remaining := float64(totalSize - written)
+					etaStr = formatDuration(time.Duration(remaining/curSpeed) * time.Second)
+				}
+
+				log.Printf("[hf] progress  : %.1f%% (%s / %s) cur=%.2f MiB/s avg=%.2f MiB/s eta=%s attempt=%d/%d",
+					pct, formatBytes(written), formatBytes(totalSize),
+					curSpeedMB, avgSpeedMB, etaStr, attempt, maxAttempts)
+
+				lastReport = now
+				lastReportBytes = written
 			}
 		}
 		if readErr == io.EOF {
@@ -193,7 +433,9 @@ func (d *Downloader) Download(ctx context.Context, modelName string, progress Pr
 		}
 		if readErr != nil {
 			f.Close()
-			return fmt.Errorf("read: %w (downloaded %d bytes so far)", readErr, written)
+			return fmt.Errorf("read after %s, downloaded %s of %s: %w",
+				formatDuration(time.Since(streamStart)),
+				formatBytes(written), formatBytes(totalSize), readErr)
 		}
 	}
 
@@ -201,18 +443,20 @@ func (d *Downloader) Download(ctx context.Context, modelName string, progress Pr
 		return fmt.Errorf("close part file: %w", err)
 	}
 
-	// Rename .part -> final
-	if err := os.Rename(partFile, dest); err != nil {
-		return fmt.Errorf("rename part file: %w", err)
+	streamElapsed := time.Since(streamStart)
+	streamedBytes := written - existingSize
+	streamSpeedMB := float64(0)
+	if streamElapsed.Seconds() > 0 {
+		streamSpeedMB = float64(streamedBytes) / streamElapsed.Seconds() / (1024 * 1024)
+	}
+	log.Printf("[hf] stream done: wrote %s in %s (%.2f MiB/s); total on disk %s",
+		formatBytes(streamedBytes), formatDuration(streamElapsed),
+		streamSpeedMB, formatBytes(written))
+
+	if totalSize > 0 && written < totalSize {
+		return fmt.Errorf("short read: got %d of %d bytes", written, totalSize)
 	}
 
-	// Write .done marker
-	if err := os.WriteFile(d.doneMarker(), []byte(time.Now().UTC().Format(time.RFC3339)), 0644); err != nil {
-		log.Printf("Warning: failed to write .done marker: %v", err)
-	}
-
-	log.Printf("GGUF download complete: %s (%d bytes)", dest, written)
-	progress.UpdateProgress("downloaded", written, totalSize, modelName)
 	return nil
 }
 

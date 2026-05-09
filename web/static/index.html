@@ -399,11 +399,37 @@
                     this.updateStatus('Something went wrong', 'error');
                     this.elements.progressContainer.classList.add('hidden');
                     let hintHtml = '';
-                    if (data.error_message) {
-                        hintHtml += '<div style="background:#fff5f5;border:1px solid #fed7d7;border-radius:6px;padding:10px 14px;margin-bottom:10px;font-family:\'SF Mono\',SFMono-Regular,Consolas,monospace;font-size:0.82em;color:#9b2c2c;word-break:break-word;max-height:80px;overflow-y:auto;line-height:1.5;">' + this.escapeHtml(data.error_message) + '</div>';
-                    }
+                    const errMsg = data.error_message || 'No detailed error message was reported.';
+                    const errTs = new Date((data.timestamp || Math.floor(Date.now() / 1000)) * 1000).toLocaleString();
+                    const errMsgEsc = this.escapeHtml(errMsg);
+                    const errTsEsc = this.escapeHtml(errTs);
+                    const modelEsc = this.escapeHtml(data.model_name || '-');
+                    const sourceEsc = data.download_source ? this.escapeHtml(data.download_source) : '';
+
+                    // Stash the raw text on window for the copy button
+                    window.__lastErrorText =
+                        'Model:  ' + (data.model_name || '-') + '\n' +
+                        'Time:   ' + errTs + '\n' +
+                        (data.download_source ? 'Source: ' + data.download_source + '\n' : '') +
+                        'Error:  ' + errMsg;
+
+                    hintHtml +=
+                        '<details open style="background:#fff5f5;border:1px solid #fed7d7;border-radius:8px;padding:10px 14px;margin-bottom:12px;">' +
+                            '<summary style="cursor:pointer;font-weight:600;color:#9b2c2c;font-size:0.9em;display:flex;align-items:center;justify-content:space-between;list-style:none;">' +
+                                '<span>Error details</span>' +
+                                '<button type="button" onclick="copyLastError(this); event.preventDefault();" ' +
+                                    'style="background:#fff;border:1px solid #fed7d7;color:#9b2c2c;padding:2px 10px;border-radius:5px;cursor:pointer;font-size:0.78em;">Copy</button>' +
+                            '</summary>' +
+                            '<div style="margin-top:8px;font-size:0.8em;color:#7b1d1d;">' +
+                                '<div><span style="opacity:0.7;">Model:</span> <code style="background:#fff;padding:1px 6px;border-radius:3px;">' + modelEsc + '</code></div>' +
+                                '<div><span style="opacity:0.7;">Time:</span> ' + errTsEsc + '</div>' +
+                                (sourceEsc ? '<div><span style="opacity:0.7;">Source:</span> <a href="' + sourceEsc + '" target="_blank" style="color:#9b2c2c;">' + sourceEsc + '</a></div>' : '') +
+                            '</div>' +
+                            '<pre style="margin:8px 0 0;background:#fff;border:1px solid #fed7d7;border-radius:6px;padding:10px 12px;font-family:\'SF Mono\',SFMono-Regular,Consolas,monospace;font-size:0.82em;color:#9b2c2c;word-break:break-word;white-space:pre-wrap;max-height:220px;overflow-y:auto;line-height:1.5;">' + errMsgEsc + '</pre>' +
+                        '</details>';
+
                     if (data.download_source) {
-                        hintHtml += 'Please check your network and make sure you can reach <a href="' + this.escapeHtml(data.download_source) + '" target="_blank" style="color:#4f46e5;font-weight:600;">' + this.escapeHtml(data.download_source) + '</a>. ';
+                        hintHtml += '<div style="margin-bottom:8px;">Please check your network and make sure you can reach <a href="' + sourceEsc + '" target="_blank" style="color:#4f46e5;font-weight:600;">' + sourceEsc + '</a>.</div>';
                     }
                     hintHtml += 'We\'ll automatically retry in a moment. You can also try now: <button onclick="triggerRetry()" style="background:#4f46e5;color:#fff;border:none;padding:6px 20px;border-radius:6px;cursor:pointer;font-size:14px;margin-left:4px;">Retry Now</button>';
                     this.showStatusHint(hintHtml);
@@ -465,19 +491,37 @@
                 const totalMB = Math.round(total / (1024 * 1024));
                 return `${completedMB} MB / ${totalMB} MB`;
             }
+            formatEtaDuration(seconds) {
+                seconds = Math.max(0, Math.round(seconds));
+                const hours = Math.floor(seconds / 3600);
+                const min = Math.floor((seconds % 3600) / 60);
+                const sec = seconds % 60;
+                if (hours > 0) {
+                    return `${hours} h ${min} min`;
+                }
+                if (min > 0) {
+                    return `${min} min ${sec} s`;
+                }
+                return `${sec} s`;
+            }
             formatSpeedEta(data) {
                 if (!data || !data.speed_bps || data.speed_bps <= 0) return null;
                 const speedMB = (data.speed_bps / (1024 * 1024)).toFixed(2);
-                let parts = [`Speed: ${speedMB} MB/s`];
+                const parts = [`Speed: ${speedMB} MB/s`];
                 if (data.eta_seconds != null && data.eta_seconds > 0) {
-                    const hours = Math.floor(data.eta_seconds / 3600);
-                    const min = Math.floor((data.eta_seconds % 3600) / 60);
-                    const sec = Math.round(data.eta_seconds % 60);
-                    let etaStr = '';
-                    if (hours > 0) etaStr += `${hours} h `;
-                    if (min > 0) etaStr += `${min} min `;
-                    etaStr += `${sec} s`;
-                    parts.push(`ETA: ${etaStr.trim()}`);
+                    const left = this.formatEtaDuration(data.eta_seconds);
+                    let etaPart = `ETA: ${left}`;
+                    if (data.eta_at != null && data.eta_at > 0) {
+                        // Only append "by HH:MM" when ETA is more than ~1 minute away,
+                        // otherwise the absolute time is just noise.
+                        if (data.eta_seconds >= 60) {
+                            const at = new Date(data.eta_at * 1000);
+                            const hh = String(at.getHours()).padStart(2, '0');
+                            const mm = String(at.getMinutes()).padStart(2, '0');
+                            etaPart += ` (by ${hh}:${mm})`;
+                        }
+                    }
+                    parts.push(etaPart);
                 } else if (data.eta_at != null && data.eta_at > 0) {
                     parts.push(`ETA: ${new Date(data.eta_at * 1000).toLocaleTimeString()}`);
                 }
@@ -541,6 +585,38 @@
                 .catch(() => {
                     if (hint) hint.innerHTML = 'Could not reach the service. Please wait a moment and try again.';
                 });
+        }
+
+        // Copy the most recent error details (set by the error renderer above) to the clipboard.
+        function copyLastError(btn) {
+            const text = window.__lastErrorText || '';
+            if (!text) return;
+            const flash = (label) => {
+                if (!btn) return;
+                const original = btn.textContent;
+                btn.textContent = label;
+                setTimeout(() => { btn.textContent = original; }, 1500);
+            };
+            const fallback = () => {
+                try {
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.position = 'fixed';
+                    ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    flash('Copied!');
+                } catch (e) {
+                    flash('Copy failed');
+                }
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(() => flash('Copied!')).catch(fallback);
+            } else {
+                fallback();
+            }
         }
 
         // Copy API URL to clipboard

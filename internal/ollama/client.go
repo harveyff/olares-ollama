@@ -134,17 +134,9 @@ func (c *Client) ModelExists(modelName string) (bool, error) {
 		return false, err
 	}
 
-	// 记录所有模型名称用于调试
-	modelNames := make([]string, 0, len(modelResp.Models))
-	for _, model := range modelResp.Models {
-		modelNames = append(modelNames, model.Name)
-	}
-	log.Printf("Checking model '%s' against available models: %v", modelName, modelNames)
-
 	// 精确匹配
 	for _, model := range modelResp.Models {
 		if model.Name == modelName {
-			log.Printf("Model '%s' found (exact match)", modelName)
 			return true, nil
 		}
 	}
@@ -292,6 +284,7 @@ func (c *Client) PullModel(modelName string) error {
 // ProgressUpdater 进度更新接口
 type ProgressUpdater interface {
 	UpdateProgress(status string, completed, total int64, modelName string)
+	UpdateError(errMsg string, completed, total int64, modelName string)
 }
 
 // PullModelWithProgress 下载模型并更新进度
@@ -311,13 +304,19 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 		bytes.NewBuffer(jsonData),
 	)
 	if err != nil {
-		progressUpdater.UpdateProgress("error", 0, 0, modelName)
+		progressUpdater.UpdateError(fmt.Sprintf("Pull request to Ollama failed: %v", err), 0, 0, modelName)
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		progressUpdater.UpdateProgress("error", 0, 0, modelName)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		snippet := strings.TrimSpace(string(body))
+		msg := fmt.Sprintf("Ollama /api/pull returned %s", resp.Status)
+		if snippet != "" {
+			msg += ": " + snippet
+		}
+		progressUpdater.UpdateError(msg, 0, 0, modelName)
 		return fmt.Errorf("failed to pull model: %s", resp.Status)
 	}
 
@@ -340,7 +339,7 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 			if lastPullResp.Total > 0 && strings.Contains(strings.ToLower(err.Error()), "eof") {
 				progressUpdater.UpdateProgress(lastPullResp.Status, lastPullResp.Completed, lastPullResp.Total, modelName)
 			} else {
-				progressUpdater.UpdateProgress("error", 0, 0, modelName)
+				progressUpdater.UpdateError(fmt.Sprintf("Decoding pull stream failed: %v", err), 0, 0, modelName)
 			}
 			return err
 		}
@@ -370,25 +369,55 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 		}
 	}
 
-	// 如果没有收到 success 状态，检查是否是因为流提前结束
+	// 流结束的两种分支：
+	//  1) gotSuccess == true  → Ollama 报告了 success，可能后台还在落盘/注册，可以
+	//     等较长时间并跑完整 verify 循环（"verifying" 状态对应 UI 的 95%）。
+	//  2) gotSuccess == false → 流提前结束（EOF / 网络抖断 / 服务端没报 success）。
+	//     此时模型很可能根本没下载完，绝对不应该让前端停在 "Verifying" 95%。
+	//     这里只做一次轻量探测：看下 Ollama 是不是已经把模型注册进列表（极少数
+	//     情况下流提前结束但文件已就绪），否则立即返回错误，让外层 ensureModel
+	//     真正重新拉一遍。
 	if !gotSuccess {
-		log.Printf("Warning: Download stream ended without 'success' status for model %s", modelName)
-		// 继续验证，因为有时流可能提前结束但下载已完成
-	} else {
-		log.Printf("Download stream completed with 'success' status (received %d times)", successCount)
+		log.Printf("Warning: Download stream ended without 'success' status for model %s — treating as failure, will let outer loop retry", modelName)
+
+		// 给 Ollama 一两秒落盘的机会，然后 1 次轻量检查
+		quickWait := 2 * time.Second
+		// 状态保持成 "pulling"（前端会显示 "Downloading"），不要切到 "verifying"
+		progressUpdater.UpdateProgress("pulling", lastPullResp.Completed, lastPullResp.Total, modelName)
+		time.Sleep(quickWait)
+
+		exists, checkErr := c.ModelExists(modelName)
+		if checkErr == nil && exists {
+			log.Printf("Model %s unexpectedly already registered after early-EOF, marking complete", modelName)
+			progressUpdater.UpdateProgress("completed", lastPullResp.Completed, lastPullResp.Total, modelName)
+			return nil
+		}
+
+		var detail string
+		if lastPullResp.Total > 0 {
+			pct := float64(lastPullResp.Completed) / float64(lastPullResp.Total) * 100
+			detail = fmt.Sprintf("Pull stream ended early at %.1f%% (%d / %d bytes) without 'success'.",
+				pct, lastPullResp.Completed, lastPullResp.Total)
+		} else {
+			detail = "Pull stream ended without sending any progress or 'success'. Ollama may be unreachable, mid-restart, or the model name is wrong."
+		}
+		if checkErr != nil {
+			detail += fmt.Sprintf(" Model existence check also failed: %v", checkErr)
+		}
+		progressUpdater.UpdateError(detail, lastPullResp.Completed, lastPullResp.Total, modelName)
+		return fmt.Errorf("pull stream ended without success for model %s: %s", modelName, detail)
 	}
 
-	// 重要：Ollama 的 /api/pull 流结束后，后台可能还在继续下载文件
-	// 需要等待一段时间让 Ollama 完成实际的文件下载
-	// 特别是大文件，可能需要更长时间
-	log.Printf("Stream ended, but Ollama may still be downloading files in background. Waiting for background download to complete...")
+	log.Printf("Download stream completed with 'success' status (received %d times)", successCount)
+
+	// 注意：只有 gotSuccess == true 才走下面的"等后台落盘 + verify"长流程，
+	// 否则 verify 状态会让前端误以为已经 95% 完成。
+	log.Printf("Stream reported success; Ollama may still be writing files in the background. Waiting for files to be registered...")
 	progressUpdater.UpdateProgress("downloading", lastPullResp.Completed, lastPullResp.Total, modelName)
-	
+
 	// 等待后台下载完成：根据文件大小估算等待时间
-	// 如果 Total 很大，需要等待更长时间
-	waitTime := 30 * time.Second // 默认等待30秒
+	waitTime := 30 * time.Second
 	if lastPullResp.Total > 0 {
-		// 估算：假设下载速度至少 10MB/s，等待时间 = 剩余大小 / 10MB/s + 缓冲
 		remainingMB := float64(lastPullResp.Total-lastPullResp.Completed) / (1024 * 1024)
 		estimatedSeconds := int(remainingMB/10) + 30 // 至少30秒缓冲
 		if estimatedSeconds > 300 {
@@ -397,81 +426,69 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 		waitTime = time.Duration(estimatedSeconds) * time.Second
 		log.Printf("Estimated wait time for background download: %v (based on %d MB remaining)", waitTime, int(remainingMB))
 	}
-	
-	// 等待期间定期检查模型是否可用
+
 	checkInterval := 5 * time.Second
 	elapsed := time.Duration(0)
 	for elapsed < waitTime {
 		time.Sleep(checkInterval)
 		elapsed += checkInterval
-		
-		// 检查模型是否已经在列表中
+
 		exists, err := c.ModelExists(modelName)
 		if err == nil && exists {
 			log.Printf("Model %s appeared in list during background download wait (after %v)", modelName, elapsed)
 			progressUpdater.UpdateProgress("completed", lastPullResp.Completed, lastPullResp.Total, modelName)
 			return nil
 		}
-		
-		// 每30秒输出一次等待状态
+
 		if int(elapsed.Seconds())%30 == 0 {
 			log.Printf("Still waiting for background download to complete... (%v/%v elapsed)", elapsed, waitTime)
 			progressUpdater.UpdateProgress("downloading", lastPullResp.Completed, lastPullResp.Total, modelName)
 		}
 	}
-	
+
 	log.Printf("Background download wait completed (%v), proceeding to verification...", waitTime)
 
-	// 验证模型是否真的下载成功并可用
-	// Ollama 可能在部分文件失败时仍返回 success，需要验证
-	// Ollama 下载完成后需要一些时间来注册模型到列表中
+	// 验证模型是否真的下载成功并可用（仅 gotSuccess 路径走这里）
 	log.Printf("Verifying model %s is complete and usable...", modelName)
-	maxVerifyAttempts := 10  // 增加验证次数
-	initialDelay := 5 * time.Second  // 第一次验证前等待5秒
-	verifyDelay := 3 * time.Second   // 初始延迟3秒
-	
-	// 第一次验证前等待，给 Ollama 时间完成模型注册
+	maxVerifyAttempts := 10
+	initialDelay := 5 * time.Second
+	verifyDelay := 3 * time.Second
+
 	log.Printf("Waiting %v before first verification attempt...", initialDelay)
 	progressUpdater.UpdateProgress("verifying", lastPullResp.Completed, lastPullResp.Total, modelName)
 	time.Sleep(initialDelay)
-	
+
 	for attempt := 1; attempt <= maxVerifyAttempts; attempt++ {
-		// 等待一段时间让 Ollama 完成文件写入和模型注册
 		if attempt > 1 {
-			log.Printf("Verification attempt %d/%d for model %s (waiting %v)...", 
+			log.Printf("Verification attempt %d/%d for model %s (waiting %v)...",
 				attempt, maxVerifyAttempts, modelName, verifyDelay)
-			// 更新状态显示验证进度
 			progressUpdater.UpdateProgress("verifying", lastPullResp.Completed, lastPullResp.Total, modelName)
 			time.Sleep(verifyDelay)
-			// 指数退避，但最大不超过30秒
 			verifyDelay *= 2
 			if verifyDelay > 30*time.Second {
 				verifyDelay = 30 * time.Second
 			}
 		}
-		
+
 		exists, err := c.ModelExists(modelName)
 		if err != nil {
 			log.Printf("Error verifying model %s: %v", modelName, err)
 			if attempt == maxVerifyAttempts {
-				progressUpdater.UpdateProgress("error", 0, 0, modelName)
+				progressUpdater.UpdateError(fmt.Sprintf("Verifying model after download failed: %v", err), 0, 0, modelName)
 				return fmt.Errorf("failed to verify model after download: %w", err)
 			}
-			// 继续验证，更新状态
 			progressUpdater.UpdateProgress("verifying", lastPullResp.Completed, lastPullResp.Total, modelName)
 			continue
 		}
-		
+
 		if exists {
 			log.Printf("Model %s verified successfully on attempt %d/%d", modelName, attempt, maxVerifyAttempts)
 			progressUpdater.UpdateProgress("completed", lastPullResp.Completed, lastPullResp.Total, modelName)
 			return nil
 		}
-		
+
 		log.Printf("Model %s not found in model list (attempt %d/%d)", modelName, attempt, maxVerifyAttempts)
-		
-		// 如果模型不在列表中，尝试通过实际调用验证模型是否可用
-		// 有时文件已下载但 Ollama 还没注册到列表中
+
 		if attempt >= 3 {
 			log.Printf("Model not in list, trying to verify via API call...")
 			usable, err := c.ModelUsable(modelName)
@@ -481,14 +498,30 @@ func (c *Client) PullModelWithProgress(modelName string, progressUpdater Progres
 				return nil
 			}
 		}
-		
-		// 更新状态，显示正在验证
+
 		progressUpdater.UpdateProgress("verifying", lastPullResp.Completed, lastPullResp.Total, modelName)
 	}
-	
+
 	// 验证失败
-	progressUpdater.UpdateProgress("error", 0, 0, modelName)
+	msg := fmt.Sprintf("Model %s pull reported success but the model never appeared in Ollama after %d verification attempts (~%s of polling)",
+		modelName, maxVerifyAttempts, formatVerifyTotal(initialDelay, maxVerifyAttempts))
+	progressUpdater.UpdateError(msg, 0, 0, modelName)
 	return fmt.Errorf("model %s download reported success but model is not available in Ollama", modelName)
+}
+
+// formatVerifyTotal returns a rough human-readable total of the verification
+// retry budget for log/error messages.
+func formatVerifyTotal(initial time.Duration, attempts int) string {
+	delay := 3 * time.Second
+	total := initial
+	for i := 1; i < attempts; i++ {
+		total += delay
+		delay *= 2
+		if delay > 30*time.Second {
+			delay = 30 * time.Second
+		}
+	}
+	return total.Round(time.Second).String()
 }
 
 // BlobExists checks whether a blob with the given digest already exists on the
@@ -545,14 +578,19 @@ func (c *Client) PushBlob(digest, filePath string, progressUpdater ProgressUpdat
 
 	resp, err := blobClient.Do(req)
 	if err != nil {
-		progressUpdater.UpdateProgress("error", 0, 0, modelName)
+		progressUpdater.UpdateError(fmt.Sprintf("Pushing blob to Ollama failed: %v", err), 0, 0, modelName)
 		return fmt.Errorf("push blob request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		progressUpdater.UpdateProgress("error", 0, 0, modelName)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		snippet := strings.TrimSpace(string(body))
+		msg := fmt.Sprintf("Ollama rejected blob upload (HTTP %s)", resp.Status)
+		if snippet != "" {
+			msg += ": " + snippet
+		}
+		progressUpdater.UpdateError(msg, 0, 0, modelName)
 		return fmt.Errorf("push blob failed (HTTP %s): %s", resp.Status, string(body))
 	}
 
@@ -661,14 +699,19 @@ func (c *Client) doCreate(req interface{}, progressModel string, progressUpdater
 		bytes.NewBuffer(jsonData),
 	)
 	if err != nil {
-		progressUpdater.UpdateProgress("error", 0, 0, progressModel)
+		progressUpdater.UpdateError(fmt.Sprintf("Create request to Ollama failed: %v", err), 0, 0, progressModel)
 		return fmt.Errorf("create request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		progressUpdater.UpdateProgress("error", 0, 0, progressModel)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		snippet := strings.TrimSpace(string(body))
+		msg := fmt.Sprintf("Ollama /api/create returned %s", resp.Status)
+		if snippet != "" {
+			msg += ": " + snippet
+		}
+		progressUpdater.UpdateError(msg, 0, 0, progressModel)
 		return fmt.Errorf("create model failed (HTTP %s): %s", resp.Status, string(body))
 	}
 
@@ -678,7 +721,7 @@ func (c *Client) doCreate(req interface{}, progressModel string, progressUpdater
 		if err := decoder.Decode(&cr); err == io.EOF {
 			break
 		} else if err != nil {
-			progressUpdater.UpdateProgress("error", 0, 0, progressModel)
+			progressUpdater.UpdateError(fmt.Sprintf("Decoding /api/create stream failed: %v", err), 0, 0, progressModel)
 			return fmt.Errorf("decode create response: %w", err)
 		}
 		log.Printf("Create status: %s", cr.Status)
@@ -689,7 +732,7 @@ func (c *Client) doCreate(req interface{}, progressModel string, progressUpdater
 		}
 	}
 
-	progressUpdater.UpdateProgress("error", 0, 0, progressModel)
+	progressUpdater.UpdateError("Ollama /api/create stream ended without 'success' status", 0, 0, progressModel)
 	return fmt.Errorf("create stream ended without success")
 }
 
