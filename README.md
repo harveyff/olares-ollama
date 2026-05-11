@@ -109,6 +109,129 @@ curl -X POST http://localhost:8080/api/generate \
   }'
 ```
 
+### Progress API: `GET /api/progress`
+
+Returns a snapshot of the current model-download state. Used by the web UI (polled every ~2 s) and safe to call from anywhere.
+
+#### Request
+
+| Item | Value |
+|---|---|
+| Method | Any (idiomatically `GET`) |
+| Path | `/api/progress` |
+| Query / Body | **None** — the handler ignores all parameters |
+| Auth | None |
+| CORS | `Access-Control-Allow-Origin: *` |
+
+```bash
+curl http://localhost:8080/api/progress
+```
+
+#### Response
+
+`Content-Type: application/json`. Always a single object. Optional fields are omitted when their underlying value is empty/zero.
+
+##### Always present
+
+| Field | Type | Description |
+|---|---|---|
+| `status` | string | Current phase (see table below) |
+| `progress` | number | Percent complete, `0.0`–`100.0` |
+| `total` | int | Total bytes (`0` when unknown) |
+| `completed` | int | Bytes downloaded so far |
+| `model_name` | string | Target model name (may be `""`) |
+| `timestamp` | int | Current server time (Unix seconds, UTC) |
+| `app_url` | string | The configured `APP_URL` (may be `""`) |
+
+##### Conditional
+
+| Field | Type | Appears when |
+|---|---|---|
+| `download_source` | string | A download source was configured at startup (HF endpoint or Ollama URL) |
+| `speed_bps` | number | Current EMA-smoothed download speed in bytes/sec, `> 0` |
+| `eta_seconds` | int | In a transfer phase **and** `speed_bps > 0` **and** `total > completed` |
+| `eta_at` | int | Same condition as `eta_seconds`; Unix-seconds timestamp for the projected finish |
+| `completed_at` | int | Download has finished (persisted across restarts via `data/progress_state.json`) |
+| `duration` | int | Total elapsed time in seconds (set together with `completed_at`) |
+| `error_message` | string | Set during `status == "error"`; capped at 500 chars (truncated with `...` if longer) |
+
+##### `status` values
+
+| Value | Meaning |
+|---|---|
+| `starting` | Internal — initial state |
+| `waiting` | Waiting for Ollama to come up |
+| `checking` | Model already present, checking for an update |
+| `pulling manifest` | Ollama: fetching manifest |
+| `pulling` / `pulling <digest>` | Ollama: streaming layer bytes |
+| `downloading` | Bytes transferring (HF direct mode, or wrapper-set) |
+| `verifying` / `verifying sha256 digest` | Post-download verification |
+| `writing manifest` / `removing any unused layers` | Ollama: finishing up |
+| `hashing` | Computing SHA-256 of a local GGUF (GGUF mode) |
+| `pushing_blob` / `blob_pushed` | Uploading a GGUF to Ollama (GGUF mode) |
+| `creating` | `POST /api/create` in progress (GGUF mode) |
+| `completed` / `success` | Model is ready |
+| `unavailable` | Ollama unreachable, or the model was deleted post-success |
+| `error` | Failure; see `error_message` |
+
+#### Examples
+
+**Downloading:**
+
+```json
+{
+  "status": "pulling 8eeb52dfb3bb",
+  "progress": 4.2,
+  "total": 9278976000,
+  "completed": 389021696,
+  "model_name": "qwen3:14b",
+  "timestamp": 1747987200,
+  "app_url": "http://qwen3.olares.cn",
+  "download_source": "http://localhost:11434",
+  "speed_bps": 7811000,
+  "eta_seconds": 1138,
+  "eta_at": 1747988338
+}
+```
+
+**Completed:**
+
+```json
+{
+  "status": "completed",
+  "progress": 100,
+  "total": 9278976000,
+  "completed": 9278976000,
+  "model_name": "qwen3:14b",
+  "timestamp": 1747988400,
+  "app_url": "http://qwen3.olares.cn",
+  "completed_at": 1747988395,
+  "duration": 1267
+}
+```
+
+**Error:**
+
+```json
+{
+  "status": "error",
+  "progress": 0,
+  "total": 0,
+  "completed": 0,
+  "model_name": "qwen3:14b",
+  "timestamp": 1747988500,
+  "app_url": "http://qwen3.olares.cn",
+  "download_source": "http://localhost:11434",
+  "error_message": "Pull stream ended without sending any progress or 'success'. Ollama may be unreachable, mid-restart, or the model name is wrong."
+}
+```
+
+#### Related endpoint
+
+- `POST /api/retry` — no body, no response body. Wakes the outer retry loop immediately instead of waiting for the next backoff tick.
+
+Source: handler registered at `internal/server/server.go`, implemented in `(*ProgressManager).HandleProgressAPI` in `internal/download/progress.go`.
+
 ## Project Structure
 
 ```
