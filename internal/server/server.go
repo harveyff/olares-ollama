@@ -71,6 +71,10 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/v1/embeddings", s.handleEmbeddings)  // OpenAI embeddings
 	s.mux.HandleFunc("/v1/responses", s.handleOpenAIResponses)
 
+	// Anthropic-compatible Messages API (e.g. Claude Code -> Ollama)
+	s.mux.HandleFunc("/v1/messages", s.handleAnthropicMessages)
+	s.mux.HandleFunc("/v1/messages/count_tokens", s.handleAnthropicMessages)
+
 	// 健康检查
 	s.mux.HandleFunc("/health", s.handleHealth)
 }
@@ -182,7 +186,9 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// responseLogger wraps ResponseWriter to capture status code
+// responseLogger wraps ResponseWriter to capture status code while
+// preserving optional interfaces (Flusher, Hijacker) of the underlying
+// writer so streaming responses (SSE) actually flush per chunk.
 type responseLogger struct {
 	http.ResponseWriter
 	statusCode int
@@ -191,6 +197,15 @@ type responseLogger struct {
 func (rl *responseLogger) WriteHeader(code int) {
 	rl.statusCode = code
 	rl.ResponseWriter.WriteHeader(code)
+}
+
+// Flush forwards to the underlying ResponseWriter when it implements
+// http.Flusher. This is required for SSE / chunked streaming through
+// middlewares that wrap the original writer.
+func (rl *responseLogger) Flush() {
+	if f, ok := rl.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // GetProgressManager 获取进度管理器

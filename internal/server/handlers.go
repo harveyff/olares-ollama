@@ -580,6 +580,164 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
+// handleAnthropicMessages forwards Anthropic-compatible /v1/messages
+// (and /v1/messages/count_tokens) to the upstream Ollama server.
+//
+// Behaviour mirrors handleOpenAIChat:
+//   - replaces the "model" field with the configured model so this proxy
+//     always serves exactly the one model it was deployed for;
+//   - preserves Anthropic auth headers (x-api-key, anthropic-version, ...);
+//   - streams Server-Sent Events back to the client when Ollama responds
+//     with text/event-stream (i.e. when the request had "stream": true).
+func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
+	log.Printf("=== Anthropic Messages endpoint: %s %s, RemoteAddr=%s ===",
+		r.Method, r.URL.Path, r.RemoteAddr)
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method == "GET" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		return
+	}
+	if r.Method != "POST" {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Allow", "POST, GET, OPTIONS")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": fmt.Sprintf("Method %s not allowed for %s", r.Method, r.URL.Path),
+		})
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("Anthropic Messages: failed to read body: %v", err)
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+	if len(body) == 0 {
+		http.Error(w, "Request body cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	// Force-replace "model" with the configured one (when configured).
+	// In base mode (no Model set) we pass the body through unchanged.
+	if s.config.Model != "" {
+		var requestData map[string]interface{}
+		if err := json.Unmarshal(body, &requestData); err == nil {
+			requestData["model"] = s.config.Model
+			if modified, mErr := json.Marshal(requestData); mErr == nil {
+				body = modified
+			} else {
+				log.Printf("Anthropic Messages: failed to re-marshal body: %v (forwarding original)", mErr)
+			}
+		} else {
+			log.Printf("Anthropic Messages: body is not JSON object, forwarding as-is: %v", err)
+		}
+	}
+
+	// Forward all client headers except Host. Anthropic auth headers
+	// (x-api-key, anthropic-version, anthropic-beta, authorization) are
+	// preserved so Ollama sees the same request the client sent.
+	headers := make(map[string]string)
+	for key, values := range r.Header {
+		if len(values) > 0 && !strings.HasPrefix(strings.ToLower(key), "host") {
+			headers[key] = values[0]
+		}
+	}
+	headers["Content-Type"] = "application/json"
+
+	previewLen := len(body)
+	if previewLen > 200 {
+		previewLen = 200
+	}
+	log.Printf(">>> Proxying %s %s to Ollama (model: %s, body: %d bytes)",
+		r.Method, r.URL.Path, s.config.Model, len(body))
+	if previewLen > 0 {
+		log.Printf(">>> Body preview: %s", string(body[:previewLen]))
+	}
+
+	resp, err := s.ollamaClient.ProxyRequest(
+		r.Method,
+		r.URL.Path,
+		bytes.NewReader(body),
+		headers,
+	)
+	if err != nil {
+		log.Printf("!!! Anthropic Messages: failed to proxy to Ollama: %v !!!", err)
+		http.Error(w, "Failed to proxy request", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	log.Printf("<<< Ollama returned status %d for %s %s", resp.StatusCode, r.Method, r.URL.Path)
+
+	for key, values := range resp.Header {
+		keyLower := strings.ToLower(key)
+		if keyLower == "content-length" || keyLower == "transfer-encoding" || keyLower == "connection" ||
+			strings.HasPrefix(keyLower, "access-control-") {
+			continue
+		}
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	isStreaming := resp.Header.Get("Transfer-Encoding") == "chunked" ||
+		strings.HasPrefix(contentType, "text/event-stream")
+	if isStreaming {
+		w.Header().Set("Transfer-Encoding", "chunked")
+		w.Header().Set("Connection", "keep-alive")
+	}
+
+	w.WriteHeader(resp.StatusCode)
+
+	if isStreaming {
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+			buf := make([]byte, 4096)
+			var total int64
+			for {
+				n, rerr := resp.Body.Read(buf)
+				if n > 0 {
+					if _, werr := w.Write(buf[:n]); werr != nil {
+						log.Printf("!!! Anthropic Messages: write error: %v", werr)
+						break
+					}
+					total += int64(n)
+					flusher.Flush()
+				}
+				if rerr == io.EOF {
+					break
+				}
+				if rerr != nil {
+					log.Printf("!!! Anthropic Messages: read error: %v", rerr)
+					break
+				}
+			}
+			flusher.Flush()
+			log.Printf("<<< Streamed %d bytes for %s %s", total, r.Method, r.URL.Path)
+			return
+		}
+	}
+
+	bytesCopied, copyErr := io.Copy(w, resp.Body)
+	if copyErr != nil {
+		log.Printf("!!! Anthropic Messages: copy error: %v", copyErr)
+	} else {
+		log.Printf("<<< Copied %d bytes for %s %s", bytesCopied, r.Method, r.URL.Path)
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 // handleOpenAIChat handles OpenAI compatible chat completions endpoint
 func (s *Server) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	log.Printf("=== OpenAI Chat Completions endpoint: %s %s, Method=%s, RemoteAddr=%s ===", 
